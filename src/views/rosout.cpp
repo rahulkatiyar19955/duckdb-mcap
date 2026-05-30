@@ -95,12 +95,13 @@ static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, Ta
 	return std::move(result);
 }
 
-static void SetOptionalString(DataChunk &output, idx_t column, idx_t row, const std::optional<std::string> &value) {
+static void SetOptionalString(Vector &vector, idx_t row, const std::optional<std::string> &value) {
 	if (!value.has_value()) {
-		FlatVector::SetNull(output.data[column], row, true);
+		FlatVector::SetNull(vector, row, true);
 		return;
 	}
-	output.SetValue(column, row, Value(*value));
+	FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, *value);
+	FlatVector::SetNull(vector, row, false);
 }
 
 static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &output) {
@@ -117,23 +118,25 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, nullptr);
 		}
 
-		output.SetValue(0, count, Value::TIMESTAMP(ToDuckTimestamp(message_view.message.logTime)));
+		auto &ts_vector = output.data[0];
+		FlatVector::GetData<timestamp_t>(ts_vector)[count] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::SetNull(ts_vector, count, false);
 		if (!payload.has_value()) {
 			FlatVector::SetNull(output.data[1], count, true);
 			FlatVector::SetNull(output.data[2], count, true);
 			FlatVector::SetNull(output.data[3], count, true);
 		} else {
-			SetOptionalString(output, 1, count, ExtractJsonStringField(*payload, "severity"));
+			SetOptionalString(output.data[1], count, ExtractJsonStringField(*payload, "severity"));
 			auto node = ExtractJsonStringField(*payload, "node");
 			if (!node.has_value()) {
 				node = ExtractJsonStringField(*payload, "name");
 			}
-			SetOptionalString(output, 2, count, node);
+			SetOptionalString(output.data[2], count, node);
 			auto message = ExtractJsonStringField(*payload, "message");
 			if (!message.has_value()) {
 				message = ExtractJsonStringField(*payload, "msg");
 			}
-			SetOptionalString(output, 3, count, message);
+			SetOptionalString(output.data[3], count, message);
 		}
 		count++;
 		++(*state.iterator);

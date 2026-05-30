@@ -14,6 +14,11 @@ static mcap::Timestamp TimestampValueToNanos(const Value &value) {
 	if (timestamp.value < 0) {
 		return 0;
 	}
+	// timestamp is microseconds; *1000 gives nanoseconds. Cap at MaxTime so a
+	// sentinel/huge value (e.g. timestamp infinity) does not overflow and wrap.
+	if (static_cast<uint64_t>(timestamp.value) >= mcap::MaxTime / 1000) {
+		return mcap::MaxTime;
+	}
 	return static_cast<mcap::Timestamp>(timestamp.value) * 1000;
 }
 

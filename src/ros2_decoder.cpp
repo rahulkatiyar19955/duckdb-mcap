@@ -236,7 +236,8 @@ struct CdrReader {
 	bool ok = true;
 
 	bool Ensure(size_t n) {
-		if (pos + n > size) {
+		// Overflow-safe equivalent of `pos + n > size` (pos + n can wrap around).
+		if (n > size || pos > size - n) {
 			ok = false;
 			return false;
 		}
