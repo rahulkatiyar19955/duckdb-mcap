@@ -90,7 +90,7 @@ static void SchemasScan(ClientContext &, TableFunctionInput &data, DataChunk &ou
 		output.SetValue(0, count, Value::USMALLINT(row.id));
 		output.SetValue(1, count, Value(row.name));
 		output.SetValue(2, count, Value(row.encoding));
-		FlatVector::GetData<string_t>(output.data[3])[count] =
+		FlatVector::GetDataMutable<string_t>(output.data[3])[count] =
 		    StringVector::AddString(output.data[3], row.data.data(), row.data.size());
 		count++;
 	}

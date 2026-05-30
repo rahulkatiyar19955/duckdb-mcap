@@ -138,28 +138,28 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 	auto &vector = output.data[output_col];
 	switch (static_cast<McapScanColumn>(column_id)) {
 	case McapScanColumn::TIMESTAMP:
-		FlatVector::GetData<timestamp_t>(vector)[row] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::GetDataMutable<timestamp_t>(vector)[row] = ToDuckTimestamp(message_view.message.logTime);
 		break;
 	case McapScanColumn::TOPIC:
-		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, message_view.channel->topic);
+		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, message_view.channel->topic);
 		break;
 	case McapScanColumn::SCHEMA:
 	case McapScanColumn::SCHEMA_NAME: {
 		auto schema_name = channel_info ? channel_info->schema_name : string();
-		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, schema_name);
+		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, schema_name);
 		break;
 	}
 	case McapScanColumn::PAYLOAD_BLOB: {
 		auto data = reinterpret_cast<const char *>(message_view.message.data);
 		auto size = static_cast<size_t>(message_view.message.dataSize);
-		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, data, size);
+		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, data, size);
 		break;
 	}
 	case McapScanColumn::PAYLOAD_JSON:
 		if (!json_payload.has_value()) {
 			FlatVector::SetNull(vector, row, true);
 		} else {
-			FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, *json_payload);
+			FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, *json_payload);
 		}
 		break;
 	default:

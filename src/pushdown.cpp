@@ -5,6 +5,7 @@
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 #include "mcap_scan.hpp"
 
 namespace duckdb {
@@ -36,13 +37,13 @@ static void ApplyConjunction(McapPushdown &pushdown, const TableFilter &filter, 
 		}
 	};
 
-	if (filter.filter_type == TableFilterType::CONJUNCTION_AND) {
-		auto &conjunction = filter.Cast<ConjunctionAndFilter>();
+	if (filter.filter_type == TableFilterType::LEGACY_CONJUNCTION_AND) {
+		auto &conjunction = filter.Cast<LegacyConjunctionAndFilter>();
 		for (auto &child : conjunction.child_filters) {
 			apply_child(child);
 		}
-	} else if (filter.filter_type == TableFilterType::CONJUNCTION_OR) {
-		auto &conjunction = filter.Cast<ConjunctionOrFilter>();
+	} else if (filter.filter_type == TableFilterType::LEGACY_CONJUNCTION_OR) {
+		auto &conjunction = filter.Cast<LegacyConjunctionOrFilter>();
 		for (auto &child : conjunction.child_filters) {
 			apply_child(child);
 		}
@@ -50,15 +51,15 @@ static void ApplyConjunction(McapPushdown &pushdown, const TableFilter &filter, 
 }
 
 static void ApplyTopicFilter(McapPushdown &pushdown, const TableFilter &filter) {
-	if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
-		auto &constant = filter.Cast<ConstantFilter>();
+	if (filter.filter_type == TableFilterType::LEGACY_CONSTANT_COMPARISON) {
+		auto &constant = filter.Cast<LegacyConstantFilter>();
 		if (constant.comparison_type == ExpressionType::COMPARE_EQUAL) {
 			AddTopic(pushdown, constant.constant);
 		}
 		return;
 	}
-	if (filter.filter_type == TableFilterType::IN_FILTER) {
-		auto &in_filter = filter.Cast<InFilter>();
+	if (filter.filter_type == TableFilterType::LEGACY_IN_FILTER) {
+		auto &in_filter = filter.Cast<LegacyInFilter>();
 		for (auto &value : in_filter.values) {
 			AddTopic(pushdown, value);
 		}
@@ -68,8 +69,8 @@ static void ApplyTopicFilter(McapPushdown &pushdown, const TableFilter &filter) 
 }
 
 static void ApplyTimestampFilter(McapPushdown &pushdown, const TableFilter &filter) {
-	if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
-		auto &constant = filter.Cast<ConstantFilter>();
+	if (filter.filter_type == TableFilterType::LEGACY_CONSTANT_COMPARISON) {
+		auto &constant = filter.Cast<LegacyConstantFilter>();
 		auto nanos = TimestampValueToNanos(constant.constant);
 		switch (constant.comparison_type) {
 		case ExpressionType::COMPARE_EQUAL:
@@ -106,11 +107,12 @@ McapPushdown ExtractMcapPushdown(const TableFunctionInitInput &input) {
 	if (!input.filters) {
 		return result;
 	}
-	for (auto &entry : input.filters->filters) {
-		if (entry.first == static_cast<idx_t>(McapScanColumn::TOPIC)) {
-			ApplyTopicFilter(result, *entry.second);
-		} else if (entry.first == static_cast<idx_t>(McapScanColumn::TIMESTAMP)) {
-			ApplyTimestampFilter(result, *entry.second);
+	for (auto &entry : *input.filters) {
+		auto column_index = static_cast<idx_t>(entry.GetIndex());
+		if (column_index == static_cast<idx_t>(McapScanColumn::TOPIC)) {
+			ApplyTopicFilter(result, entry.Filter());
+		} else if (column_index == static_cast<idx_t>(McapScanColumn::TIMESTAMP)) {
+			ApplyTimestampFilter(result, entry.Filter());
 		}
 	}
 	return result;

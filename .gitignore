@@ -4,3 +4,5 @@ sample_mcap/*.mcap
 build/
 __pycache__/
 *.duckdb_extension
+.cache/
+vcpkg/
