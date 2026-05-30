@@ -1,0 +1,133 @@
+# name: test/sql/mcap_all.test
+# description: End-to-end coverage for the mcap extension (scan, metadata,
+#              pushdown, projection, JSON decode, rosout view).
+
+require mcap
+
+require json
+
+statement ok
+LOAD 'mcap';
+
+statement ok
+LOAD 'json';
+
+# ---------------------------------------------------------------------------
+# Basic scan
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap');
+----
+2
+
+query T
+SELECT topic FROM mcap_scan('test/mcap/sample.mcap') ORDER BY timestamp;
+----
+/rosout
+/odom
+
+query T
+SELECT schema_name FROM mcap_scan('test/mcap/sample.mcap') ORDER BY topic;
+----
+foxglove.Log
+foxglove.Log
+
+# ---------------------------------------------------------------------------
+# Metadata (summary only)
+# ---------------------------------------------------------------------------
+query II
+SELECT count(*), sum(count) FROM mcap_topics('test/mcap/sample.mcap');
+----
+2	2
+
+query T
+SELECT topic FROM mcap_channels('test/mcap/sample.mcap') ORDER BY topic LIMIT 1;
+----
+/odom
+
+query T
+SELECT name FROM mcap_schemas('test/mcap/sample.mcap') ORDER BY id LIMIT 1;
+----
+foxglove.Log
+
+# ---------------------------------------------------------------------------
+# Topic predicate pushdown
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic = '/rosout';
+----
+1
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic IN ('/rosout', '/odom');
+----
+2
+
+# A predicate matching no existing topic must read nothing.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic = '/nope';
+----
+0
+
+# ---------------------------------------------------------------------------
+# Timestamp range pushdown / chunk pruning
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*)
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE timestamp >= '2023-11-14 22:13:20' AND timestamp < '2023-11-14 22:13:21';
+----
+1
+
+query I
+SELECT count(*)
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE timestamp > '2023-11-14 22:14:00';
+----
+1
+
+# Combined topic + timestamp.
+query I
+SELECT count(*)
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/odom' AND timestamp > '2023-11-14 22:14:00';
+----
+1
+
+# ---------------------------------------------------------------------------
+# Projection pushdown (omitting payload columns must not crash / corrupt)
+# ---------------------------------------------------------------------------
+query IT
+SELECT timestamp IS NOT NULL, topic
+FROM mcap_scan('test/mcap/sample.mcap')
+ORDER BY topic
+LIMIT 1;
+----
+1	/odom
+
+# ---------------------------------------------------------------------------
+# JSON payload decode
+# ---------------------------------------------------------------------------
+query T
+SELECT payload_json->>'$.severity'
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/rosout'
+LIMIT 1;
+----
+ERROR
+
+query T
+SELECT payload_json->>'$.message'
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/rosout'
+LIMIT 1;
+----
+Planner aborted
+
+# ---------------------------------------------------------------------------
+# ROS-aware rosout view
+# ---------------------------------------------------------------------------
+query TTT
+SELECT severity, node, message FROM rosout('test/mcap/sample.mcap');
+----
+ERROR	planner	Planner aborted

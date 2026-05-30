@@ -12,4 +12,4 @@ FROM mcap_scan('test/mcap/sample.mcap')
 ORDER BY topic
 LIMIT 1;
 ----
-true /odom
+true	/odom

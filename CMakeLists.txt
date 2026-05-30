@@ -58,6 +58,22 @@ message(STATUS "MCAP extension using lz4: ${LZ4_LIBRARY} (headers: ${LZ4_INCLUDE
 message(STATUS "MCAP extension using zstd headers: ${ZSTD_INCLUDE_DIR}")
 include_directories(${LZ4_INCLUDE_DIR} ${ZSTD_INCLUDE_DIR})
 
+# --- Protobuf (dynamic message decoding of protobuf-encoded MCAP payloads) ---
+# protobuf ships proper CMake config files (unlike lz4/zstd), so find_package works.
+# It pulls in its abseil + utf8_range deps as imported targets. Add Homebrew keg
+# prefixes to the search path so the config + its deps resolve without env setup.
+if(APPLE)
+    execute_process(COMMAND brew --prefix OUTPUT_VARIABLE BREW_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    foreach(dep protobuf abseil utf8-range)
+        if(BREW_PREFIX AND EXISTS "${BREW_PREFIX}/opt/${dep}")
+            list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}/opt/${dep}")
+        endif()
+    endforeach()
+endif()
+find_package(Protobuf CONFIG REQUIRED)
+message(STATUS "MCAP extension using protobuf ${Protobuf_VERSION}")
+
 set(EXTENSION_SOURCES
     src/mcap_extension.cpp
     src/mcap_impl.cpp
@@ -67,13 +83,14 @@ set(EXTENSION_SOURCES
     src/schema_cache.cpp
     src/pushdown.cpp
     src/decoder.cpp
+    src/protobuf_decoder.cpp
     src/views/rosout.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} "" ${EXTENSION_SOURCES})
 
 foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
-    target_link_libraries(${target} ${LZ4_LIBRARY})
+    target_link_libraries(${target} ${LZ4_LIBRARY} protobuf::libprotobuf)
 endforeach()
 
 install(

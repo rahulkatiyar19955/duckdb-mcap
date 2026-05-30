@@ -1,0 +1,33 @@
+# name: test/sql/protobuf.test
+# description: Protobuf payload decoding via the embedded FileDescriptorSet
+
+require mcap
+
+require json
+
+statement ok
+LOAD 'mcap';
+
+statement ok
+LOAD 'json';
+
+# Schema name comes from the embedded protobuf descriptor.
+query T
+SELECT DISTINCT schema_name FROM mcap_scan('test/mcap/protobuf.mcap');
+----
+test.Point
+
+# All protobuf rows decode to valid JSON.
+query II
+SELECT count(*), sum(json_valid(payload_json)::INT) FROM mcap_scan('test/mcap/protobuf.mcap');
+----
+2	2
+
+# Field extraction (incl. nested-capable JSON path) on decoded protobuf.
+query TTT
+SELECT payload_json->>'$.x', payload_json->>'$.y', payload_json->>'$.label'
+FROM mcap_scan('test/mcap/protobuf.mcap')
+ORDER BY timestamp;
+----
+1.5	2.5	alpha
+-3	4	beta

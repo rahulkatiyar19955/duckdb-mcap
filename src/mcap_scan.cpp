@@ -8,6 +8,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "protobuf_decoder.hpp"
 #include "pushdown.hpp"
 #include "schema_cache.hpp"
 
@@ -43,6 +44,7 @@ struct McapScanGlobalState : public GlobalTableFunctionState {
 	std::optional<mcap::LinearMessageView::Iterator> end;
 	vector<column_t> column_ids;
 	McapPushdown pushdown;
+	ProtobufDecoder protobuf;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -87,7 +89,7 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	return make_uniq<McapScanBindData>(std::move(path));
 }
 
-static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapScanBindData>();
 	auto result = make_uniq<McapScanGlobalState>();
 	result->column_ids = input.column_ids;
@@ -104,15 +106,7 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &co
 	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
 
 	result->cache = McapSchemaCache::FromReader(result->reader);
-
-	// Collect the distinct topics in the file so topic predicates can be resolved
-	// by evaluating each candidate against the pushed-down filter expression.
-	vector<string> known_topics;
-	known_topics.reserve(result->cache.channels.size());
-	for (auto &entry : result->cache.channels) {
-		known_topics.push_back(entry.second.topic);
-	}
-	result->pushdown = ExtractMcapPushdown(context, input, known_topics);
+	result->pushdown = ExtractMcapPushdown(input);
 
 	auto options = ToReadMessageOptions(result->pushdown);
 	auto on_problem = [](const mcap::Status &status) {
@@ -147,28 +141,33 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 	auto &vector = output.data[output_col];
 	switch (static_cast<McapScanColumn>(column_id)) {
 	case McapScanColumn::TIMESTAMP:
-		FlatVector::GetDataMutable<timestamp_t>(vector)[row] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::GetData<timestamp_t>(vector)[row] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::SetNull(vector, row, false);
 		break;
 	case McapScanColumn::TOPIC:
-		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, message_view.channel->topic);
+		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, message_view.channel->topic);
+		FlatVector::SetNull(vector, row, false);
 		break;
 	case McapScanColumn::SCHEMA:
 	case McapScanColumn::SCHEMA_NAME: {
 		auto schema_name = channel_info ? channel_info->schema_name : string();
-		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, schema_name);
+		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, schema_name);
+		FlatVector::SetNull(vector, row, false);
 		break;
 	}
 	case McapScanColumn::PAYLOAD_BLOB: {
 		auto data = reinterpret_cast<const char *>(message_view.message.data);
 		auto size = static_cast<size_t>(message_view.message.dataSize);
-		FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, data, size);
+		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, data, size);
+		FlatVector::SetNull(vector, row, false);
 		break;
 	}
 	case McapScanColumn::PAYLOAD_JSON:
 		if (!json_payload.has_value()) {
 			FlatVector::SetNull(vector, row, true);
 		} else {
-			FlatVector::GetDataMutable<string_t>(vector)[row] = StringVector::AddString(vector, *json_payload);
+			FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, *json_payload);
+			FlatVector::SetNull(vector, row, false);
 		}
 		break;
 	default:
@@ -189,9 +188,8 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 
 		const auto *channel_info = state.cache.Lookup(message_view.message.channelId);
 		std::optional<std::string> json_payload;
-		if (decode_json) {
-			auto encoding = channel_info ? channel_info->message_encoding : string();
-			json_payload = DecodePayloadJson(encoding, message_view.message);
+		if (decode_json && channel_info) {
+			json_payload = DecodePayloadJson(*channel_info, message_view.message, &state.protobuf);
 		}
 
 		for (idx_t output_col = 0; output_col < state.column_ids.size(); output_col++) {

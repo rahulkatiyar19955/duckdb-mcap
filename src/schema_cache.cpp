@@ -17,6 +17,7 @@ McapSchemaCache McapSchemaCache::FromReader(const mcap::McapReader &reader) {
 		if (schema_entry != schemas.end() && schema_entry->second) {
 			info.schema_name = schema_entry->second->name;
 			info.schema_encoding = schema_entry->second->encoding;
+			info.schema_data = schema_entry->second->data;
 		}
 		cache.channels.emplace(entry.first, std::move(info));
 	}

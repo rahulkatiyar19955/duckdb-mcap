@@ -3,8 +3,13 @@
 
 require mcap
 
+require json
+
 statement ok
 LOAD 'mcap';
+
+statement ok
+LOAD 'json';
 
 query T
 SELECT payload_json->>'$.severity'
