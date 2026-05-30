@@ -1,2 +1,6 @@
 mcap_repo/
 sample_mcap/*.mcap
+.venv/
+build/
+__pycache__/
+*.duckdb_extension
