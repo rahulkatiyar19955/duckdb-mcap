@@ -108,7 +108,13 @@ McapPushdown ExtractMcapPushdown(const TableFunctionInitInput &input) {
 		return result;
 	}
 	for (auto &entry : *input.filters) {
-		auto column_index = static_cast<idx_t>(entry.GetIndex());
+		// Filter keys are indices into the projected column_ids list, not logical
+		// table columns; translate back to the real column id before matching.
+		auto filter_index = static_cast<idx_t>(entry.GetIndex());
+		if (filter_index >= input.column_ids.size()) {
+			continue;
+		}
+		auto column_index = input.column_ids[filter_index];
 		if (column_index == static_cast<idx_t>(McapScanColumn::TOPIC)) {
 			ApplyTopicFilter(result, entry.Filter());
 		} else if (column_index == static_cast<idx_t>(McapScanColumn::TIMESTAMP)) {

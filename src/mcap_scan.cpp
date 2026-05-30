@@ -99,10 +99,11 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, 
 
 	ThrowIfMcapError(result->reader.open(bind.path), bind.path);
 
+	// Always read the summary: it populates the channel/schema registry (needed for
+	// schema_name + JSON decoding) and enables index-based chunk/topic pruning.
+	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+
 	result->pushdown = ExtractMcapPushdown(input);
-	if (result->pushdown.start_time != 0 || result->pushdown.end_time != mcap::MaxTime) {
-		ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
-	}
 	result->cache = McapSchemaCache::FromReader(result->reader);
 
 	auto options = ToReadMessageOptions(result->pushdown);
