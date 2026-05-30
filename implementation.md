@@ -45,7 +45,19 @@ duckdb --version
 }
 ```
 
-### 0.4 Standing DuckDB-skill workflow (use throughout every phase)
+### 0.4 Authoritative reference sources (ALWAYS consult these first)
+Do **not** rely on memory for APIs — look them up in these two sources before
+writing or reviewing code in any phase:
+
+| Topic | Source | How |
+|-------|--------|-----|
+| **DuckDB** — extensions, table functions, pushdown, types, SQL | **DuckDB skill** | Run `duckdb-docs "<query>"` (e.g. `duckdb-docs "filter pushdown table function"`). Use `query`/`read-file` to validate output. |
+| **MCAP** — reader API, record types, field names, encodings | **`mcap_repo/`** (vendored) | Read the headers directly: `mcap_repo/cpp/mcap/include/mcap/reader.hpp` and `types.hpp` (this repo vendors MCAP C++ **v2.1.3**). These are the source of truth — prefer them over web docs. |
+
+> Convention: each phase below lists the exact `duckdb-docs` lookups and the
+> relevant `mcap_repo/` headers to read first.
+
+### 0.5 Standing DuckDB-skill workflow (use throughout every phase)
 | Skill command | When to use |
 |---------------|-------------|
 | `duckdb-docs <query>` | Look up extension / table-function / pushdown APIs **before** coding each phase. |
@@ -53,7 +65,23 @@ duckdb --version
 | `read-file <path>` | Preview/profile a data file or MCAP fixture while debugging. |
 | `read-memories` | Recall decisions/patterns from earlier sessions. |
 
-> Convention: each phase lists the exact `duckdb-docs` lookups to run first.
+### 0.6 Testing environment (use a virtual env when possible)
+Isolate any Python-based tooling (test runners, MCAP fixture generation with the
+`mcap` Python package, benchmark scripts) inside a virtual environment so the
+system Python stays clean:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install mcap pytest            # fixture generation + test deps
+# ... run tests ...
+deactivate
+```
+
+- Add `.venv/` to `.gitignore`.
+- The C++ extension tests run via `make test` (sqllogictest) and don't need the
+  venv, but **MCAP fixture generation and any Python validation must run inside
+  the activated venv**.
 
 ---
 
@@ -337,11 +365,19 @@ WHERE topic = '/rosout'
 
 ## Build & test loop (every phase)
 ```bash
+# 0. Activate the venv for any Python tooling (fixture gen, pytest, benchmarks)
+source .venv/bin/activate
+
+# 1. Build + run the C++ extension tests
 make                                   # build extension
 make test                              # run tests/sql/*.test (sqllogictest)
 
-# Ad-hoc validation with the DuckDB skill
+# 2. Ad-hoc validation with the DuckDB skill
 query "LOAD 'mcap'; SELECT * FROM mcap_topics('test/mcap/sample.mcap');"
 read-file test/mcap/sample.mcap        # inspect a fixture
-duckdb-docs "filter pushdown table function"   # look up an API mid-implementation
+
+# 3. Look things up — never guess:
+duckdb-docs "filter pushdown table function"            # DuckDB API → DuckDB skill
+#   MCAP API → read the vendored headers directly:
+#   mcap_repo/cpp/mcap/include/mcap/reader.hpp, types.hpp
 ```
