@@ -141,8 +141,9 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 } // namespace
 
 TableFunction GetRosoutFunction() {
+	// NOTE: RosoutScan always writes all 4 columns by fixed index, so it does not
+	// support projection pushdown (doing so shrinks the output chunk and overflows).
 	TableFunction function("rosout", {LogicalType::VARCHAR}, RosoutScan, RosoutBind, RosoutInitGlobal);
-	function.projection_pushdown = true;
 	return function;
 }
 

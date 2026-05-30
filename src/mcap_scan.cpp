@@ -87,7 +87,7 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	return make_uniq<McapScanBindData>(std::move(path));
 }
 
-static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapScanBindData>();
 	auto result = make_uniq<McapScanGlobalState>();
 	result->column_ids = input.column_ids;
@@ -103,8 +103,16 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, 
 	// schema_name + JSON decoding) and enables index-based chunk/topic pruning.
 	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
 
-	result->pushdown = ExtractMcapPushdown(input);
 	result->cache = McapSchemaCache::FromReader(result->reader);
+
+	// Collect the distinct topics in the file so topic predicates can be resolved
+	// by evaluating each candidate against the pushed-down filter expression.
+	vector<string> known_topics;
+	known_topics.reserve(result->cache.channels.size());
+	for (auto &entry : result->cache.channels) {
+		known_topics.push_back(entry.second.topic);
+	}
+	result->pushdown = ExtractMcapPushdown(context, input, known_topics);
 
 	auto options = ToReadMessageOptions(result->pushdown);
 	auto on_problem = [](const mcap::Status &status) {
@@ -204,7 +212,10 @@ TableFunction GetMcapScanFunction() {
 	                       McapScanInitLocal);
 	function.projection_pushdown = true;
 	function.filter_pushdown = true;
-	function.filter_prune = true;
+	// Keep DuckDB's own filter evaluation: our topic/timestamp pushdown is an I/O
+	// optimization (skip channels/chunks), not an exact row-level filter, so we let
+	// the executor re-check predicates for correctness.
+	function.filter_prune = false;
 	function.supports_pushdown_type = McapSupportsPushdown;
 	return function;
 }

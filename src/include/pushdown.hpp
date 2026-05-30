@@ -22,7 +22,11 @@ struct McapPushdown {
 };
 
 bool McapSupportsPushdown(const FunctionData &bind_data, idx_t column_index);
-McapPushdown ExtractMcapPushdown(const TableFunctionInitInput &input);
+//! Extract MCAP read options from DuckDB's pushed-down filters. `known_topics`
+//! enumerates every topic in the file so topic predicates (=, IN, OR, LIKE, ...)
+//! can be resolved by evaluating each candidate against the filter expression.
+McapPushdown ExtractMcapPushdown(ClientContext &context, const TableFunctionInitInput &input,
+                                 const vector<string> &known_topics);
 mcap::ReadMessageOptions ToReadMessageOptions(const McapPushdown &pushdown);
 
 } // namespace duckdb
