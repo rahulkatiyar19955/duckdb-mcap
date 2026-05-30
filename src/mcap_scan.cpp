@@ -10,6 +10,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "protobuf_decoder.hpp"
 #include "pushdown.hpp"
+#include "ros2_decoder.hpp"
 #include "schema_cache.hpp"
 
 #include <mcap/reader.hpp>
@@ -45,6 +46,7 @@ struct McapScanGlobalState : public GlobalTableFunctionState {
 	vector<column_t> column_ids;
 	McapPushdown pushdown;
 	ProtobufDecoder protobuf;
+	Ros2Decoder ros2;
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -189,7 +191,7 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 		const auto *channel_info = state.cache.Lookup(message_view.message.channelId);
 		std::optional<std::string> json_payload;
 		if (decode_json && channel_info) {
-			json_payload = DecodePayloadJson(*channel_info, message_view.message, &state.protobuf);
+			json_payload = DecodePayloadJson(*channel_info, message_view.message, &state.protobuf, &state.ros2);
 		}
 
 		for (idx_t output_col = 0; output_col < state.column_ids.size(); output_col++) {

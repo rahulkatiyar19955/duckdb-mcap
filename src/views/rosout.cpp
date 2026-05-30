@@ -111,10 +111,10 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 		const auto &message_view = **state.iterator;
 
 		auto channel_info = state.cache.Lookup(message_view.message.channelId);
-		// rosout messages are JSON-encoded; no protobuf decoder needed here.
+		// rosout messages are JSON-encoded; no protobuf/cdr decoder needed here.
 		std::optional<std::string> payload;
 		if (channel_info) {
-			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr);
+			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, nullptr);
 		}
 
 		output.SetValue(0, count, Value::TIMESTAMP(ToDuckTimestamp(message_view.message.logTime)));

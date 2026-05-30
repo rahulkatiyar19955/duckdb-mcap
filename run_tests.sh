@@ -16,7 +16,7 @@ UNITTEST=build/release/test/unittest
 FIXTURE=test/mcap/sample.mcap
 
 # --- ensure the fixtures exist ---
-if [[ ! -f "$FIXTURE" || ! -f test/mcap/protobuf.mcap ]]; then
+if [[ ! -f "$FIXTURE" || ! -f test/mcap/protobuf.mcap || ! -f test/mcap/ros2.mcap ]]; then
     echo ">> fixtures missing; generating..."
     if [[ -f .venv/bin/activate ]]; then
         # shellcheck disable=SC1091
@@ -24,6 +24,7 @@ if [[ ! -f "$FIXTURE" || ! -f test/mcap/protobuf.mcap ]]; then
     fi
     python test/generate_sample_mcap.py
     python test/generate_protobuf_mcap.py
+    python test/generate_ros2_mcap.py
 fi
 
 # --- build (unless --no-build) ---

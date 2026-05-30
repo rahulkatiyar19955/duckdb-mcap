@@ -84,6 +84,7 @@ set(EXTENSION_SOURCES
     src/pushdown.cpp
     src/decoder.cpp
     src/protobuf_decoder.cpp
+    src/ros2_decoder.cpp
     src/views/rosout.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
