@@ -174,8 +174,9 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 	auto decode_json = NeedsJson(state);
 
 	while (count < STANDARD_VECTOR_SIZE && *state.iterator != *state.end) {
+		// NOTE: message_view (and message.data) is only valid until the iterator is
+		// advanced, so read everything we need before the ++ at the end of the loop.
 		const auto &message_view = **state.iterator;
-		++(*state.iterator);
 
 		const auto *channel_info = state.cache.Lookup(message_view.message.channelId);
 		std::optional<std::string> json_payload;
@@ -189,6 +190,7 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 			                     json_payload);
 		}
 		count++;
+		++(*state.iterator);
 	}
 
 	output.SetCardinality(count);

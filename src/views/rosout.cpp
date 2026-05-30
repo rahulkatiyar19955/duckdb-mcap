@@ -107,8 +107,8 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 	auto &state = data.global_state->Cast<RosoutGlobalState>();
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && *state.iterator != *state.end) {
+		// message_view (and message.data) is only valid until the iterator advances.
 		const auto &message_view = **state.iterator;
-		++(*state.iterator);
 
 		auto channel_info = state.cache.Lookup(message_view.message.channelId);
 		auto encoding = channel_info ? channel_info->message_encoding : string();
@@ -133,6 +133,7 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 			SetOptionalString(output, 3, count, message);
 		}
 		count++;
+		++(*state.iterator);
 	}
 	output.SetCardinality(count);
 }
