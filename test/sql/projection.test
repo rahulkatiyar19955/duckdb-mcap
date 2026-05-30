@@ -1,0 +1,15 @@
+# name: test/sql/projection.test
+# description: Projection pushdown can omit payload columns
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query TT
+SELECT timestamp IS NOT NULL, topic
+FROM mcap_scan('test/mcap/sample.mcap')
+ORDER BY topic
+LIMIT 1;
+----
+true	/odom

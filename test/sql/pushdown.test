@@ -1,0 +1,17 @@
+# name: test/sql/pushdown.test
+# description: Topic predicate pushdown correctness
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic = '/rosout';
+----
+1
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic IN ('/rosout', '/odom');
+----
+2

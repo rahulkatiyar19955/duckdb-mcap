@@ -1,0 +1,12 @@
+# name: test/sql/rosout.test
+# description: ROS-aware rosout helper
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query TTT
+SELECT severity, node, message FROM rosout('test/mcap/sample.mcap');
+----
+ERROR	planner	Planner aborted

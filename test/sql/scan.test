@@ -1,0 +1,17 @@
+# name: test/sql/scan.test
+# description: Basic MCAP scan over the generated fixture
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap');
+----
+2
+
+query T
+SELECT topic FROM mcap_scan('test/mcap/sample.mcap') ORDER BY timestamp LIMIT 1;
+----
+/rosout

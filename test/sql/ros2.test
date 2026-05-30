@@ -1,0 +1,37 @@
+# name: test/sql/ros2.test
+# description: ROS2 cdr payload decoding (ros2msg schema + CDR reader)
+
+require mcap
+
+require json
+
+statement ok
+LOAD 'mcap';
+
+statement ok
+LOAD 'json';
+
+# Root type name comes from the schema.
+query T
+SELECT DISTINCT schema_name FROM mcap_scan('test/mcap/ros2.mcap');
+----
+test_msgs/msg/Sample
+
+# All cdr rows decode to valid JSON.
+query II
+SELECT count(*), sum(json_valid(payload_json)::INT) FROM mcap_scan('test/mcap/ros2.mcap');
+----
+2	2
+
+# Nested struct fields (header.stamp.sec, header.frame_id), fixed float64[3] array,
+# and trailing string all decode correctly.
+query TTTT
+SELECT payload_json->>'$.header.frame_id',
+       payload_json->>'$.header.stamp.sec',
+       payload_json->'$.values',
+       payload_json->>'$.label'
+FROM mcap_scan('test/mcap/ros2.mcap')
+ORDER BY timestamp;
+----
+base_link	100	[1.5,2.5,3.5]	alpha
+odom	101	[-1,0,9.81]	beta

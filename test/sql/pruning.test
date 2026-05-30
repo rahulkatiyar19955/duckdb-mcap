@@ -1,0 +1,15 @@
+# name: test/sql/pruning.test
+# description: Timestamp range pushdown correctness
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query I
+SELECT count(*)
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE timestamp >= '2023-11-14 22:13:20'
+  AND timestamp < '2023-11-14 22:13:21';
+----
+1

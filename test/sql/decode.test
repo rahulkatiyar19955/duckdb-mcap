@@ -1,0 +1,20 @@
+# name: test/sql/decode.test
+# description: JSON passthrough payload decoding
+
+require mcap
+
+require json
+
+statement ok
+LOAD 'mcap';
+
+statement ok
+LOAD 'json';
+
+query T
+SELECT payload_json->>'$.severity'
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/rosout'
+LIMIT 1;
+----
+ERROR

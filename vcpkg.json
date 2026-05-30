@@ -1,0 +1,7 @@
+{
+  "dependencies": [
+    "mcap",
+    "zstd",
+    "lz4"
+  ]
+}

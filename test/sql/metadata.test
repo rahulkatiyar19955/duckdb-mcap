@@ -1,0 +1,22 @@
+# name: test/sql/metadata.test
+# description: Summary-backed metadata table functions
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query II
+SELECT count(*), sum(count) FROM mcap_topics('test/mcap/sample.mcap');
+----
+2	2
+
+query T
+SELECT topic FROM mcap_channels('test/mcap/sample.mcap') ORDER BY topic LIMIT 1;
+----
+/odom
+
+query T
+SELECT name FROM mcap_schemas('test/mcap/sample.mcap') ORDER BY id LIMIT 1;
+----
+foxglove.Log
