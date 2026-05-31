@@ -61,13 +61,13 @@ static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInp
 	}
 
 	names.emplace_back("timestamp");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 	names.emplace_back("severity");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("node");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("message");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
 	return make_uniq<RosoutBindData>(input.inputs[0].GetValue<string>());
 }
@@ -149,7 +149,7 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 TableFunction GetRosoutFunction() {
 	// NOTE: RosoutScan always writes all 4 columns by fixed index, so it does not
 	// support projection pushdown (doing so shrinks the output chunk and overflows).
-	TableFunction function("rosout", {LogicalType::VARCHAR}, RosoutScan, RosoutBind, RosoutInitGlobal);
+	TableFunction function("rosout", {LogicalTypeId::VARCHAR}, RosoutScan, RosoutBind, RosoutInitGlobal);
 	return function;
 }
 

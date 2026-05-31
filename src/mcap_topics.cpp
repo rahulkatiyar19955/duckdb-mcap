@@ -69,15 +69,15 @@ static unique_ptr<FunctionData> PathBind(ClientContext &, TableFunctionBindInput
 		throw BinderException("MCAP metadata functions require a single non-null path argument");
 	}
 	names.emplace_back("topic");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("type");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("count");
-	return_types.emplace_back(LogicalType::UBIGINT);
+	return_types.emplace_back(LogicalTypeId::UBIGINT);
 	names.emplace_back("start");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 	names.emplace_back("end");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 	return make_uniq<McapMetadataBindData>(input.inputs[0].GetValue<string>());
 }
 
@@ -87,13 +87,13 @@ static unique_ptr<FunctionData> ChannelsBind(ClientContext &, TableFunctionBindI
 		throw BinderException("mcap_channels(path) requires a single non-null path argument");
 	}
 	names.emplace_back("id");
-	return_types.emplace_back(LogicalType::USMALLINT);
+	return_types.emplace_back(LogicalTypeId::USMALLINT);
 	names.emplace_back("topic");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("schema_id");
-	return_types.emplace_back(LogicalType::USMALLINT);
+	return_types.emplace_back(LogicalTypeId::USMALLINT);
 	names.emplace_back("message_encoding");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	return make_uniq<McapMetadataBindData>(input.inputs[0].GetValue<string>());
 }
 
@@ -169,11 +169,11 @@ static void ChannelsScan(ClientContext &, TableFunctionInput &data, DataChunk &o
 } // namespace
 
 TableFunction GetMcapTopicsFunction() {
-	return TableFunction("mcap_topics", {LogicalType::VARCHAR}, TopicsScan, PathBind, TopicsInitGlobal);
+	return TableFunction("mcap_topics", {LogicalTypeId::VARCHAR}, TopicsScan, PathBind, TopicsInitGlobal);
 }
 
 TableFunction GetMcapChannelsFunction() {
-	return TableFunction("mcap_channels", {LogicalType::VARCHAR}, ChannelsScan, ChannelsBind, ChannelsInitGlobal);
+	return TableFunction("mcap_channels", {LogicalTypeId::VARCHAR}, ChannelsScan, ChannelsBind, ChannelsInitGlobal);
 }
 
 } // namespace duckdb

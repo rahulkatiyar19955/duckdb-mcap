@@ -56,13 +56,13 @@ static unique_ptr<FunctionData> SchemasBind(ClientContext &, TableFunctionBindIn
 		throw BinderException("mcap_schemas(path) requires a single non-null path argument");
 	}
 	names.emplace_back("id");
-	return_types.emplace_back(LogicalType::USMALLINT);
+	return_types.emplace_back(LogicalTypeId::USMALLINT);
 	names.emplace_back("name");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("encoding");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("data");
-	return_types.emplace_back(LogicalType::BLOB);
+	return_types.emplace_back(LogicalTypeId::BLOB);
 	return make_uniq<McapSchemasBindData>(input.inputs[0].GetValue<string>());
 }
 
@@ -100,7 +100,7 @@ static void SchemasScan(ClientContext &, TableFunctionInput &data, DataChunk &ou
 } // namespace
 
 TableFunction GetMcapSchemasFunction() {
-	return TableFunction("mcap_schemas", {LogicalType::VARCHAR}, SchemasScan, SchemasBind, SchemasInitGlobal);
+	return TableFunction("mcap_schemas", {LogicalTypeId::VARCHAR}, SchemasScan, SchemasBind, SchemasInitGlobal);
 }
 
 } // namespace duckdb
