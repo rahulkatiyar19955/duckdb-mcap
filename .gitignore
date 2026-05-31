@@ -1,4 +1,3 @@
-mcap_repo/
 sample_mcap/*.mcap
 .venv/
 build/
