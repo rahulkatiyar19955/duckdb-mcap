@@ -8,22 +8,14 @@ name: Build & Release mcap extension
 #   linux_amd64   linux_arm64   osx_arm64
 #
 # Trigger:
-#   - push a tag like `v0.1.0`  -> builds + creates/updates that Release
+#   - push a tag like `v0.1.0`  -> builds all platforms + creates/updates that Release
 #   - manual run (workflow_dispatch) -> builds + uploads artifacts only
-#   - PRs / pushes to main -> build-only smoke test (no release)
 
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "src/**"
-      - "CMakeLists.txt"
-      - "extension_config.cmake"
-      - "Makefile"
-      - ".github/workflows/release.yml"
 
 permissions:
   contents: write # needed to create/update Releases on tag builds
