@@ -1,0 +1,154 @@
+name: Build & Release mcap extension
+
+# Builds the `mcap` DuckDB extension for every major OS/arch and publishes the
+# loadable `.duckdb_extension` binaries to a GitHub Release so they can be
+# downloaded (e.g. vendored into DataPilot's backend/app/vendor/mcap/<platform>/).
+#
+# Platform matrix (the names match DataPilot's _extension_path() keys):
+#   linux_amd64   linux_arm64   osx_arm64   osx_amd64
+#
+# Trigger:
+#   - push a tag like `v0.1.0`  -> builds + creates/updates that Release
+#   - manual run (workflow_dispatch) -> builds + uploads artifacts only
+#   - PRs / pushes to main -> build-only smoke test (no release)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "CMakeLists.txt"
+      - "extension_config.cmake"
+      - "Makefile"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: write # needed to create/update Releases on tag builds
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_amd64
+            runner: ubuntu-22.04
+            arch: amd64
+          - platform: linux_arm64
+            runner: ubuntu-22.04-arm
+            arch: arm64
+          - platform: osx_amd64
+            runner: macos-13 # Intel runner
+          - platform: osx_arm64
+            runner: macos-14 # Apple Silicon runner
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # --- Dependencies -----------------------------------------------------
+      - name: Install build deps (Linux)
+        if: startsWith(matrix.platform, 'linux')
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake ninja-build pkg-config \
+            liblz4-dev libzstd-dev libprotobuf-dev protobuf-compiler
+
+      - name: Install build deps (macOS)
+        if: startsWith(matrix.platform, 'osx')
+        run: |
+          brew install cmake ninja lz4 zstd protobuf
+
+      # --- Build ------------------------------------------------------------
+      # The standard extension-ci-tools Makefile builds the loadable extension
+      # against the pinned DuckDB submodule (v1.4.4). GEN=ninja speeds it up.
+      - name: Build extension
+        run: GEN=ninja make release
+
+      - name: Locate built extension
+        id: locate
+        shell: bash
+        run: |
+          ext=$(find build/release -name 'mcap.duckdb_extension' | head -1)
+          if [ -z "$ext" ]; then
+            echo "::error::mcap.duckdb_extension not found under build/release"
+            find build -name '*.duckdb_extension' || true
+            exit 1
+          fi
+          echo "path=$ext" >> "$GITHUB_OUTPUT"
+          echo "Built: $ext"
+          file "$ext" || true
+
+      # --- Smoke test: load it and run a trivial query ----------------------
+      - name: Smoke test (load extension)
+        shell: bash
+        run: |
+          python3 -m pip install --quiet "duckdb>=1.4,<1.5"
+          python3 - "${{ steps.locate.outputs.path }}" <<'PY'
+          import sys, duckdb
+          ext = sys.argv[1]
+          con = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
+          con.load_extension(ext)
+          con.load_extension("json")
+          # functions are registered if this binds without error
+          con.execute("SELECT 1")
+          print("OK: loaded", ext, "duckdb", duckdb.__version__)
+          PY
+
+      # --- Package: rename to <platform>/mcap.duckdb_extension --------------
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.platform }}"
+          cp "${{ steps.locate.outputs.path }}" "dist/${{ matrix.platform }}/mcap.duckdb_extension"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcap-${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}/mcap.duckdb_extension
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Flatten into per-platform names so each Release asset is unique and the
+      # platform is obvious from the filename:
+      #   mcap-linux_amd64.duckdb_extension, mcap-osx_arm64.duckdb_extension, ...
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release
+          for dir in artifacts/mcap-*; do
+            plat=$(basename "$dir" | sed 's/^mcap-//')
+            cp "$dir/mcap.duckdb_extension" "release/mcap-${plat}.duckdb_extension"
+          done
+          ls -la release
+          ( cd release && sha256sum *.duckdb_extension > SHA256SUMS )
+          cat release/SHA256SUMS
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.duckdb_extension
+            release/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true
