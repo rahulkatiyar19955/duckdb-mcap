@@ -5,7 +5,7 @@ name: Build & Release mcap extension
 # downloaded (e.g. vendored into DataPilot's backend/app/vendor/mcap/<platform>/).
 #
 # Platform matrix (the names match DataPilot's _extension_path() keys):
-#   linux_amd64   linux_arm64   osx_arm64   osx_amd64
+#   linux_amd64   linux_arm64   osx_arm64
 #
 # Trigger:
 #   - push a tag like `v0.1.0`  -> builds + creates/updates that Release
@@ -42,8 +42,6 @@ jobs:
           - platform: linux_arm64
             runner: ubuntu-22.04-arm
             arch: arm64
-          - platform: osx_amd64
-            runner: macos-13 # Intel runner
           - platform: osx_arm64
             runner: macos-14 # Apple Silicon runner
     steps:
