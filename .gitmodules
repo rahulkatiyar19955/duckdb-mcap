@@ -6,3 +6,7 @@
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools.git
 	branch = v1.4.4
+[submodule "mcap_repo"]
+	path = mcap_repo
+	url = https://github.com/foxglove/mcap.git
+	branch = releases/cpp/v2.1.3

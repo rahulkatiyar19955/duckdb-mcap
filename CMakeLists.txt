@@ -71,7 +71,14 @@ if(APPLE)
         endif()
     endforeach()
 endif()
-find_package(Protobuf CONFIG REQUIRED)
+# Prefer protobuf's CMake config package (Homebrew, vcpkg, protobuf >=22 which
+# pulls in abseil/utf8_range imported targets). Fall back to CMake's bundled
+# FindProtobuf module (Debian/Ubuntu's libprotobuf-dev 3.21.x ships no config
+# files). Both define the protobuf::libprotobuf imported target we link against.
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf MODULE REQUIRED)
+endif()
 message(STATUS "MCAP extension using protobuf ${Protobuf_VERSION}")
 
 set(EXTENSION_SOURCES
@@ -91,6 +98,7 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} "" ${EXTENSION_SOURCES})
 
 foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+    target_compile_features(${target} PRIVATE cxx_std_17)
     target_link_libraries(${target} ${LZ4_LIBRARY} protobuf::libprotobuf)
 endforeach()
 

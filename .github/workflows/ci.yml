@@ -1,0 +1,66 @@
+name: CI
+
+# Lightweight build + test on every push/PR. Builds the extension against the
+# pinned DuckDB (v1.4.4) and runs the sqllogictest suite via `make test`.
+# Release/packaging lives in release.yml and is intentionally separate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_amd64
+            runner: ubuntu-22.04
+          - platform: osx_arm64
+            runner: macos-14
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install build deps (Linux)
+        if: startsWith(matrix.platform, 'linux')
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake ninja-build pkg-config \
+            liblz4-dev libzstd-dev libprotobuf-dev protobuf-compiler
+
+      - name: Install build deps (macOS)
+        if: startsWith(matrix.platform, 'osx')
+        run: brew install cmake ninja lz4 zstd protobuf
+
+      # Test fixtures are committed, but regenerate them so generator drift is
+      # also caught by CI. Needs the python mcap + protobuf writers.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Regenerate MCAP test fixtures
+        run: |
+          python -m pip install --quiet mcap protobuf
+          python test/generate_sample_mcap.py
+          python test/generate_protobuf_mcap.py
+          python test/generate_ros2_mcap.py
+
+      - name: Build extension
+        run: GEN=ninja make release
+
+      - name: Run test suite
+        run: make test

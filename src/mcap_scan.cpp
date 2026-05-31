@@ -76,15 +76,15 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	reader.close();
 
 	names.emplace_back("timestamp");
-	return_types.emplace_back(LogicalType::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 	names.emplace_back("topic");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("schema");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("payload_blob");
-	return_types.emplace_back(LogicalType::BLOB);
+	return_types.emplace_back(LogicalTypeId::BLOB);
 	names.emplace_back("schema_name");
-	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("payload_json");
 	return_types.emplace_back(LogicalType::JSON());
 
@@ -208,7 +208,7 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 } // namespace
 
 TableFunction GetMcapScanFunction() {
-	TableFunction function("mcap_scan", {LogicalType::VARCHAR}, McapScanFunction, McapScanBind, McapScanInitGlobal,
+	TableFunction function("mcap_scan", {LogicalTypeId::VARCHAR}, McapScanFunction, McapScanBind, McapScanInitGlobal,
 	                       McapScanInitLocal);
 	function.projection_pushdown = true;
 	function.filter_pushdown = true;
