@@ -36,7 +36,7 @@ static mcap::Timestamp SatAddNanos(mcap::Timestamp t, mcap::Timestamp delta) {
 // Fills `out` with a SUPERSET of the topics that can satisfy `filter` and returns
 // true iff the predicate is fully representable as a finite topic set. On false the
 // caller must NOT restrict topics — the predicate may match topics not in `out`.
-static bool CollectTopicSet(std::unordered_set<std::string> &out, const TableFilter &filter) {
+bool CollectTopicSet(std::unordered_set<std::string> &out, const TableFilter &filter) {
 	switch (filter.filter_type) {
 	case TableFilterType::CONSTANT_COMPARISON: {
 		auto &constant = filter.Cast<ConstantFilter>();
@@ -102,7 +102,7 @@ static bool CollectTopicSet(std::unordered_set<std::string> &out, const TableFil
 // Computes a range that CONTAINS every row matching `filter` and returns true iff
 // the predicate is representable as one contiguous range. On false the caller must
 // NOT restrict the time window.
-static bool CollectTimeRange(mcap::Timestamp &start, mcap::Timestamp &end, const TableFilter &filter) {
+bool CollectTimeRange(mcap::Timestamp &start, mcap::Timestamp &end, const TableFilter &filter) {
 	switch (filter.filter_type) {
 	case TableFilterType::CONSTANT_COMPARISON: {
 		auto &constant = filter.Cast<ConstantFilter>();

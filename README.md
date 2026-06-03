@@ -65,7 +65,16 @@ make test
 ## Fast dev loop
 
 ```bash
-./run_tests.sh              # incremental build + run all test/sql/*.test
+./run_tests.sh              # incremental build + run all test/sql/*.test, then the C++ unit tests
 ./run_tests.sh --no-build   # just run tests
 ./run_tests.sh protobuf     # build + run a single test
 ```
+
+## Tests
+
+- **SQL** (`test/sql/*.test`): end-to-end sqllogictests over generated MCAP
+  fixtures, run via DuckDB's `unittest` binary (`make test`).
+- **C++** (`test/cpp/*.cpp`): Catch2 unit tests for the pushdown filter logic
+  (AND/OR/IN, range hull, overflow saturation). Build + run with
+  `./run_cpp_tests.sh` (links the `libduckdb` from a prior build); also run as
+  part of a full `./run_tests.sh`.
