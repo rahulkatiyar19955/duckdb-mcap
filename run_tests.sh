@@ -71,3 +71,9 @@ if [[ "$fail" -gt 0 ]]; then
     tail -40 /tmp/mcap_test_out.log
     exit 1
 fi
+
+# --- C++ unit tests (pushdown logic) — only on a full-suite run ---
+if [[ ${#args[@]} -eq 0 ]]; then
+    echo "-----------------------------------------"
+    ./run_cpp_tests.sh
+fi

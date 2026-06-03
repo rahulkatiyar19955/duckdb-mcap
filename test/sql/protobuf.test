@@ -21,9 +21,11 @@ test.Point
 query II
 SELECT count(*), sum(json_valid(payload_json)::INT) FROM mcap_scan('test/mcap/protobuf.mcap');
 ----
-2	2
+3	3
 
 # Field extraction (incl. nested-capable JSON path) on decoded protobuf.
+# The third row has x=0/y=0: proto3 omits default scalars on the wire, so this also
+# asserts the decoder still emits them (else the x/y extraction would be NULL).
 query TTT
 SELECT payload_json->>'$.x', payload_json->>'$.y', payload_json->>'$.label'
 FROM mcap_scan('test/mcap/protobuf.mcap')
@@ -31,3 +33,4 @@ ORDER BY timestamp;
 ----
 1.5	2.5	alpha
 -3	4	beta
+0	0	origin

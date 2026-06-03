@@ -64,3 +64,6 @@ jobs:
 
       - name: Run test suite
         run: make test
+
+      - name: Run C++ unit tests
+        run: ./run_cpp_tests.sh

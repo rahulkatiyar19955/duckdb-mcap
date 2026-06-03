@@ -6,7 +6,7 @@ Built against **DuckDB v1.4.4** (pinned via submodules).
 
 ## Current surface
 
-- `mcap_scan(path)` streams MCAP messages with `timestamp`, `topic`, `schema`,
+- `mcap_scan(path)` streams MCAP messages with `timestamp`, `topic`,
   `payload_blob`, `schema_name`, and decoded `payload_json`.
 - `mcap_topics(path)`, `mcap_schemas(path)`, and `mcap_channels(path)` read
   summary metadata instantly (no message scan).
@@ -65,7 +65,16 @@ make test
 ## Fast dev loop
 
 ```bash
-./run_tests.sh              # incremental build + run all test/sql/*.test
+./run_tests.sh              # incremental build + run all test/sql/*.test, then the C++ unit tests
 ./run_tests.sh --no-build   # just run tests
 ./run_tests.sh protobuf     # build + run a single test
 ```
+
+## Tests
+
+- **SQL** (`test/sql/*.test`): end-to-end sqllogictests over generated MCAP
+  fixtures, run via DuckDB's `unittest` binary (`make test`).
+- **C++** (`test/cpp/*.cpp`): Catch2 unit tests for the pushdown filter logic
+  (AND/OR/IN, range hull, overflow saturation). Build + run with
+  `./run_cpp_tests.sh` (links the `libduckdb` from a prior build); also run as
+  part of a full `./run_tests.sh`.

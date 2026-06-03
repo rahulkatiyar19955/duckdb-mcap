@@ -86,6 +86,14 @@ def main() -> None:
             publish_time=1_700_000_001_000_000_000,
             data=Point(x=-3.0, y=4.0, label="beta").SerializeToString(),
         )
+        # All-default scalars (x=0, y=0): proto3 omits these on the wire, so this row
+        # exercises that the decoder still emits zero-valued fields in the JSON.
+        writer.add_message(
+            channel_id=chan,
+            log_time=1_700_000_002_000_000_000,
+            publish_time=1_700_000_002_000_000_000,
+            data=Point(x=0.0, y=0.0, label="origin").SerializeToString(),
+        )
         writer.finish()
 
 

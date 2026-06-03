@@ -7,6 +7,8 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "mcap_scan.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 static mcap::Timestamp TimestampValueToNanos(const Value &value) {
@@ -22,86 +24,164 @@ static mcap::Timestamp TimestampValueToNanos(const Value &value) {
 	return static_cast<mcap::Timestamp>(timestamp.value) * 1000;
 }
 
-static void AddTopic(McapPushdown &pushdown, const Value &value) {
-	if (!pushdown.topics.has_value()) {
-		pushdown.topics.emplace();
-	}
-	pushdown.topics->insert(value.ToString());
+//! Saturating add so the +1us bumps used to widen exclusive/equality bounds never
+//! overflow mcap::MaxTime and wrap around to a tiny value (which would invert the range).
+static mcap::Timestamp SatAddNanos(mcap::Timestamp t, mcap::Timestamp delta) {
+	return (t > mcap::MaxTime - delta) ? mcap::MaxTime : t + delta;
 }
 
-static void ApplyTopicFilter(McapPushdown &pushdown, const TableFilter &filter);
-static void ApplyTimestampFilter(McapPushdown &pushdown, const TableFilter &filter);
-
-static void ApplyConjunction(McapPushdown &pushdown, const TableFilter &filter, idx_t column_index) {
-	auto apply_child = [&](const unique_ptr<TableFilter> &child) {
-		if (column_index == static_cast<idx_t>(McapScanColumn::TOPIC)) {
-			ApplyTopicFilter(pushdown, *child);
-		} else if (column_index == static_cast<idx_t>(McapScanColumn::TIMESTAMP)) {
-			ApplyTimestampFilter(pushdown, *child);
-		}
-	};
-
-	if (filter.filter_type == TableFilterType::CONJUNCTION_AND) {
-		auto &conjunction = filter.Cast<ConjunctionAndFilter>();
-		for (auto &child : conjunction.child_filters) {
-			apply_child(child);
-		}
-	} else if (filter.filter_type == TableFilterType::CONJUNCTION_OR) {
-		auto &conjunction = filter.Cast<ConjunctionOrFilter>();
-		for (auto &child : conjunction.child_filters) {
-			apply_child(child);
-		}
-	}
-}
-
-static void ApplyTopicFilter(McapPushdown &pushdown, const TableFilter &filter) {
-	if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
+//===--------------------------------------------------------------------===//
+// Topic predicate -> finite set of topics (best-effort, conservative)
+//===--------------------------------------------------------------------===//
+// Fills `out` with a SUPERSET of the topics that can satisfy `filter` and returns
+// true iff the predicate is fully representable as a finite topic set. On false the
+// caller must NOT restrict topics — the predicate may match topics not in `out`.
+bool CollectTopicSet(std::unordered_set<std::string> &out, const TableFilter &filter) {
+	switch (filter.filter_type) {
+	case TableFilterType::CONSTANT_COMPARISON: {
 		auto &constant = filter.Cast<ConstantFilter>();
-		if (constant.comparison_type == ExpressionType::COMPARE_EQUAL) {
-			AddTopic(pushdown, constant.constant);
+		if (constant.comparison_type == ExpressionType::COMPARE_EQUAL && !constant.constant.IsNull()) {
+			out.insert(constant.constant.ToString());
+			return true;
 		}
-		return;
+		return false; // <, >, <> ... are not a finite topic set
 	}
-	if (filter.filter_type == TableFilterType::IN_FILTER) {
+	case TableFilterType::IN_FILTER: {
 		auto &in_filter = filter.Cast<InFilter>();
+		std::unordered_set<std::string> local;
 		for (auto &value : in_filter.values) {
-			AddTopic(pushdown, value);
+			if (value.IsNull()) {
+				return false; // leave `out` untouched: not a finite set
+			}
+			local.insert(value.ToString());
 		}
-		return;
+		out.insert(local.begin(), local.end());
+		return true;
 	}
-	ApplyConjunction(pushdown, filter, static_cast<idx_t>(McapScanColumn::TOPIC));
+	case TableFilterType::CONJUNCTION_AND: {
+		// AND matches a SUBSET of each child, so the union of the children we can
+		// represent is a safe superset. Representable if at least one child is.
+		// Collect each child into a local set first so an un-representable child does
+		// not leave stray topics in `out` (which would needlessly widen the scan).
+		auto &conjunction = filter.Cast<ConjunctionAndFilter>();
+		bool any = false;
+		for (auto &child : conjunction.child_filters) {
+			std::unordered_set<std::string> child_topics;
+			if (CollectTopicSet(child_topics, *child)) {
+				out.insert(child_topics.begin(), child_topics.end());
+				any = true;
+			}
+		}
+		return any;
+	}
+	case TableFilterType::CONJUNCTION_OR: {
+		// OR matches the UNION of its children; we can only bound it if EVERY child is
+		// representable. One un-representable branch leaves the topic unconstrained, so
+		// accumulate into a local set and merge only once all branches have succeeded.
+		auto &conjunction = filter.Cast<ConjunctionOrFilter>();
+		if (conjunction.child_filters.empty()) {
+			return false;
+		}
+		std::unordered_set<std::string> local;
+		for (auto &child : conjunction.child_filters) {
+			if (!CollectTopicSet(local, *child)) {
+				return false;
+			}
+		}
+		out.insert(local.begin(), local.end());
+		return true;
+	}
+	default:
+		return false;
+	}
 }
 
-static void ApplyTimestampFilter(McapPushdown &pushdown, const TableFilter &filter) {
-	if (filter.filter_type == TableFilterType::CONSTANT_COMPARISON) {
+//===--------------------------------------------------------------------===//
+// Timestamp predicate -> single contiguous [start, end] range (best-effort)
+//===--------------------------------------------------------------------===//
+// Computes a range that CONTAINS every row matching `filter` and returns true iff
+// the predicate is representable as one contiguous range. On false the caller must
+// NOT restrict the time window.
+bool CollectTimeRange(mcap::Timestamp &start, mcap::Timestamp &end, const TableFilter &filter) {
+	switch (filter.filter_type) {
+	case TableFilterType::CONSTANT_COMPARISON: {
 		auto &constant = filter.Cast<ConstantFilter>();
 		if (constant.constant.IsNull()) {
-			return;
+			return false;
 		}
 		auto nanos = TimestampValueToNanos(constant.constant);
+		start = 0;
+		end = mcap::MaxTime;
 		switch (constant.comparison_type) {
 		case ExpressionType::COMPARE_EQUAL:
-			pushdown.start_time = std::max(pushdown.start_time, nanos);
-			pushdown.end_time = std::min(pushdown.end_time, nanos + 1000);
-			break;
+			start = nanos;
+			end = SatAddNanos(nanos, 1000);
+			return true;
 		case ExpressionType::COMPARE_GREATERTHAN:
-			pushdown.start_time = std::max(pushdown.start_time, nanos + 1000);
-			break;
+			start = SatAddNanos(nanos, 1000);
+			return true;
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			pushdown.start_time = std::max(pushdown.start_time, nanos);
-			break;
+			start = nanos;
+			return true;
 		case ExpressionType::COMPARE_LESSTHAN:
-			pushdown.end_time = std::min(pushdown.end_time, nanos);
-			break;
+			end = nanos;
+			return true;
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			pushdown.end_time = std::min(pushdown.end_time, nanos + 1000);
-			break;
+			end = SatAddNanos(nanos, 1000);
+			return true;
 		default:
-			break;
+			return false;
 		}
-		return;
 	}
-	ApplyConjunction(pushdown, filter, static_cast<idx_t>(McapScanColumn::TIMESTAMP));
+	case TableFilterType::CONJUNCTION_AND: {
+		// AND narrows: intersect the children we can represent.
+		auto &conjunction = filter.Cast<ConjunctionAndFilter>();
+		bool any = false;
+		mcap::Timestamp lo = 0;
+		mcap::Timestamp hi = mcap::MaxTime;
+		for (auto &child : conjunction.child_filters) {
+			mcap::Timestamp child_start;
+			mcap::Timestamp child_end;
+			if (CollectTimeRange(child_start, child_end, *child)) {
+				lo = std::max(lo, child_start);
+				hi = std::min(hi, child_end);
+				any = true;
+			}
+		}
+		if (!any) {
+			return false;
+		}
+		start = lo;
+		end = hi;
+		return true;
+	}
+	case TableFilterType::CONJUNCTION_OR: {
+		// OR widens: a disjunction of ranges is bounded by their hull, but only if
+		// EVERY child is representable (else the disjunction is unbounded). This is the
+		// key correctness guard: intersecting OR branches (the old behaviour) produced
+		// an empty/inverted window for "ts < a OR ts > b" and silently dropped rows.
+		auto &conjunction = filter.Cast<ConjunctionOrFilter>();
+		if (conjunction.child_filters.empty()) {
+			return false;
+		}
+		mcap::Timestamp lo = mcap::MaxTime;
+		mcap::Timestamp hi = 0;
+		for (auto &child : conjunction.child_filters) {
+			mcap::Timestamp child_start;
+			mcap::Timestamp child_end;
+			if (!CollectTimeRange(child_start, child_end, *child)) {
+				return false;
+			}
+			lo = std::min(lo, child_start);
+			hi = std::max(hi, child_end);
+		}
+		start = lo;
+		end = hi;
+		return true;
+	}
+	default:
+		return false;
+	}
 }
 
 bool McapSupportsPushdown(const FunctionData &, idx_t column_index) {
@@ -123,9 +203,23 @@ McapPushdown ExtractMcapPushdown(const TableFunctionInitInput &input) {
 		}
 		auto column_index = input.column_ids[filter_index];
 		if (column_index == static_cast<idx_t>(McapScanColumn::TOPIC)) {
-			ApplyTopicFilter(result, *entry.second);
+			// Only restrict topics if the whole predicate is representable as a set;
+			// otherwise reading every topic and letting DuckDB filter stays correct.
+			std::unordered_set<std::string> topics;
+			if (CollectTopicSet(topics, *entry.second) && !topics.empty()) {
+				if (result.topics.has_value()) {
+					result.topics->insert(topics.begin(), topics.end());
+				} else {
+					result.topics = std::move(topics);
+				}
+			}
 		} else if (column_index == static_cast<idx_t>(McapScanColumn::TIMESTAMP)) {
-			ApplyTimestampFilter(result, *entry.second);
+			mcap::Timestamp start = 0;
+			mcap::Timestamp end = mcap::MaxTime;
+			if (CollectTimeRange(start, end, *entry.second)) {
+				result.start_time = std::max(result.start_time, start);
+				result.end_time = std::min(result.end_time, end);
+			}
 		}
 	}
 	return result;
