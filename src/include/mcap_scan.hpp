@@ -7,13 +7,12 @@ namespace duckdb {
 enum class McapScanColumn : idx_t {
 	TIMESTAMP = 0,
 	TOPIC = 1,
-	SCHEMA = 2,
-	PAYLOAD_BLOB = 3,
-	SCHEMA_NAME = 4,
-	PAYLOAD_JSON = 5
+	PAYLOAD_BLOB = 2,
+	SCHEMA_NAME = 3,
+	PAYLOAD_JSON = 4
 };
 
-constexpr idx_t MCAP_SCAN_COLUMN_COUNT = 6;
+constexpr idx_t MCAP_SCAN_COLUMN_COUNT = 5;
 
 TableFunction GetMcapScanFunction();
 

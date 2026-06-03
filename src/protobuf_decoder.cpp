@@ -74,6 +74,15 @@ std::optional<std::string> ProtobufDecoder::Decode(const McapChannelInfo &channe
 
 	gp::util::JsonPrintOptions options;
 	options.preserve_proto_field_names = true;
+	// Emit zero/default-valued proto3 scalars too (they are omitted by default), so a
+	// Point with x=0 still decodes to {"x":0,...} and SQL field extraction is stable.
+	// The option was renamed in protobuf v26 (5026000); keep the old name for the
+	// 3.x/4.x toolchains still used on some CI distros.
+#if defined(GOOGLE_PROTOBUF_VERSION) && GOOGLE_PROTOBUF_VERSION >= 5026000
+	options.always_print_fields_with_no_presence = true;
+#else
+	options.always_print_primitive_fields = true;
+#endif
 	std::string json;
 	auto status = gp::util::MessageToJsonString(*proto, &json, options);
 	if (!status.ok()) {

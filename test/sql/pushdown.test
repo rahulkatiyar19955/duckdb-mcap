@@ -15,3 +15,18 @@ query I
 SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap') WHERE topic IN ('/rosout', '/odom');
 ----
 2
+
+# A disjunction over the topic column unions the two topic sets (both rows).
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/rosout' OR topic = '/odom';
+----
+2
+
+# A disjunction mixing topic equality with a non-set predicate (LIKE) is not a
+# finite set; pushdown must fall back to reading all topics, not just '/odom'.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample.mcap')
+WHERE topic = '/odom' OR topic LIKE '/ros%';
+----
+2

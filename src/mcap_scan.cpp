@@ -79,8 +79,6 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
 	names.emplace_back("topic");
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
-	names.emplace_back("schema");
-	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("payload_blob");
 	return_types.emplace_back(LogicalTypeId::BLOB);
 	names.emplace_back("schema_name");
@@ -150,7 +148,6 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, message_view.channel->topic);
 		FlatVector::SetNull(vector, row, false);
 		break;
-	case McapScanColumn::SCHEMA:
 	case McapScanColumn::SCHEMA_NAME: {
 		auto schema_name = channel_info ? channel_info->schema_name : string();
 		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, schema_name);

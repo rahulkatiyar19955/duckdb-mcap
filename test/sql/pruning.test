@@ -13,3 +13,14 @@ WHERE timestamp >= '2023-11-14 22:13:20'
   AND timestamp < '2023-11-14 22:13:21';
 ----
 1
+
+# Regression: a disjunction over the timestamp column is two disjoint ranges. The
+# old pushdown intersected the branches into an empty/inverted window and dropped
+# every row; both messages (one in each branch) must still be returned.
+query I
+SELECT count(*)
+FROM mcap_scan('test/mcap/sample.mcap')
+WHERE timestamp < '2023-11-14 22:13:21'
+   OR timestamp > '2023-11-14 22:14:00';
+----
+2

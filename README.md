@@ -6,7 +6,7 @@ Built against **DuckDB v1.4.4** (pinned via submodules).
 
 ## Current surface
 
-- `mcap_scan(path)` streams MCAP messages with `timestamp`, `topic`, `schema`,
+- `mcap_scan(path)` streams MCAP messages with `timestamp`, `topic`,
   `payload_blob`, `schema_name`, and decoded `payload_json`.
 - `mcap_topics(path)`, `mcap_schemas(path)`, and `mcap_channels(path)` read
   summary metadata instantly (no message scan).
