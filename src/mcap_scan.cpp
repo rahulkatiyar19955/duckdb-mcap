@@ -1,6 +1,7 @@
 #include "mcap_scan.hpp"
 
 #include "decoder.hpp"
+#include "duckdb/common/enums/file_glob_options.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -8,7 +9,6 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/common/enums/file_glob_options.hpp"
 #include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "protobuf_decoder.hpp"
@@ -19,11 +19,16 @@
 #include <mcap/reader.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 
 namespace duckdb {
 
 namespace {
+
+//! Group roughly this many chunks into one scan partition. Small enough to keep
+//! many threads busy on big files, large enough to amortize per-partition setup.
+constexpr idx_t CHUNKS_PER_PARTITION = 4;
 
 struct McapScanBindData : public TableFunctionData {
 	explicit McapScanBindData(vector<string> paths_p) : paths(std::move(paths_p)) {
@@ -42,47 +47,76 @@ struct McapScanBindData : public TableFunctionData {
 	}
 };
 
+//! One unit of parallel work: a [start, end) log-time window of one file.
+//! Windows per file are disjoint and cover the pushdown range, and MCAP's read
+//! window is start-inclusive / end-exclusive, so every message belongs to
+//! exactly one partition — chunk overlap at boundaries costs only duplicate
+//! decompression, never duplicate (or dropped) rows.
+struct McapScanPartition {
+	idx_t file_index;
+	mcap::Timestamp start;
+	mcap::Timestamp end;
+};
+
 struct McapScanGlobalState : public GlobalTableFunctionState {
 	vector<string> paths;
-	idx_t next_file = 0;
+	vector<column_t> column_ids;
+	McapPushdown pushdown;
+	vector<McapScanPartition> partitions;
+	//! Per-file channel/schema registry, built once and read-only afterwards.
+	vector<McapSchemaCache> caches;
+	std::atomic<idx_t> next_partition {0};
+	std::atomic<idx_t> finished_partitions {0};
+
+	idx_t MaxThreads() const override {
+		return MaxValue<idx_t>(partitions.size(), 1);
+	}
+};
+
+struct McapScanLocalState : public LocalTableFunctionState {
+	idx_t file_index = DConstants::INVALID_INDEX;
 	string current_filename;
 	unique_ptr<McapFile> file;
-	McapSchemaCache cache;
 	unique_ptr<mcap::LinearMessageView> view;
 	std::optional<mcap::LinearMessageView::Iterator> iterator;
 	std::optional<mcap::LinearMessageView::Iterator> end;
-	vector<column_t> column_ids;
-	McapPushdown pushdown;
+	const McapSchemaCache *cache = nullptr;
 	//! Decoders cache parsed schemas by per-file schema id, so they are recreated
-	//! for each file rather than shared across the whole scan.
+	//! whenever this thread moves to a different file.
 	unique_ptr<ProtobufDecoder> protobuf;
 	unique_ptr<Ros2Decoder> ros2;
 
-	//! Open the next file in the list (resetting per-file caches/decoders).
-	//! Returns false when every file has been consumed.
-	bool AdvanceFile(ClientContext &context) {
-		if (next_file >= paths.size()) {
+	//! Claim the next partition; (re)open the file when it differs from the one
+	//! this thread already holds. Returns false when no partitions remain.
+	bool NextPartition(ClientContext &context, McapScanGlobalState &gstate) {
+		auto partition_index = gstate.next_partition.fetch_add(1);
+		if (partition_index >= gstate.partitions.size()) {
 			return false;
 		}
-		current_filename = paths[next_file++];
-		file = OpenMcapFile(context, current_filename);
-		cache = McapSchemaCache::FromReader(file->reader);
-		protobuf = make_uniq<ProtobufDecoder>();
-		ros2 = make_uniq<Ros2Decoder>();
-		auto options = ToReadMessageOptions(pushdown);
+		auto &partition = gstate.partitions[partition_index];
+		if (!file || file_index != partition.file_index) {
+			file = OpenMcapFile(context, gstate.paths[partition.file_index]);
+			file_index = partition.file_index;
+			current_filename = gstate.paths[partition.file_index];
+			cache = &gstate.caches[partition.file_index];
+			protobuf = make_uniq<ProtobufDecoder>();
+			ros2 = make_uniq<Ros2Decoder>();
+		}
+		auto options = ToReadMessageOptions(gstate.pushdown);
+		options.startTime = partition.start;
+		options.endTime = partition.end;
 		auto on_problem = [](const mcap::Status &status) {
 			if (!status.ok()) {
 				throw IOException("MCAP scan failed: %s", status.message);
 			}
 		};
+		// The old iterators point into the old view: drop them before replacing it.
+		iterator.reset();
+		end.reset();
 		view = make_uniq<mcap::LinearMessageView>(file->reader.readMessages(on_problem, options));
 		iterator.emplace(view->begin());
 		end.emplace(view->end());
 		return true;
-	}
-
-	idx_t MaxThreads() const override {
-		return 1;
 	}
 };
 
@@ -122,6 +156,42 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 	return make_uniq<McapScanBindData>(std::move(paths));
 }
 
+//! Split one file's pushdown window into partitions whose boundaries fall on
+//! chunk start times (so partitions align with chunks for I/O efficiency).
+//! Files without chunk indexes get a single whole-window partition.
+//! NOTE: with a narrowed time window, messages stored *outside* chunks in a
+//! file that has chunk indexes can be skipped by mcap's index-based byte-range
+//! computation — a pre-existing property of indexed reads (standard writers
+//! always chunk their messages).
+static void BuildPartitions(idx_t file_index, const mcap::McapReader &reader, const McapPushdown &pushdown,
+                            vector<McapScanPartition> &partitions) {
+	auto lo = pushdown.start_time;
+	auto hi = pushdown.end_time;
+	if (lo >= hi) {
+		return; // degenerate window: no rows can match
+	}
+	vector<mcap::Timestamp> bounds;
+	bounds.push_back(lo);
+	auto &chunks = reader.chunkIndexes();
+	if (chunks.size() > CHUNKS_PER_PARTITION) {
+		vector<mcap::Timestamp> starts;
+		for (auto &chunk : chunks) {
+			if (chunk.messageStartTime > lo && chunk.messageStartTime < hi) {
+				starts.push_back(chunk.messageStartTime);
+			}
+		}
+		std::sort(starts.begin(), starts.end());
+		starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+		for (idx_t i = CHUNKS_PER_PARTITION; i < starts.size(); i += CHUNKS_PER_PARTITION) {
+			bounds.push_back(starts[i]);
+		}
+	}
+	bounds.push_back(hi);
+	for (idx_t i = 0; i + 1 < bounds.size(); i++) {
+		partitions.push_back({file_index, bounds[i], bounds[i + 1]});
+	}
+}
+
 static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapScanBindData>();
 	auto result = make_uniq<McapScanGlobalState>();
@@ -134,17 +204,25 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &co
 
 	result->paths = bind.paths;
 	result->pushdown = ExtractMcapPushdown(input);
-	// OpenMcapFile (inside AdvanceFile) reads each file's summary: it populates the
-	// channel/schema registry (needed for schema_name + JSON decoding) and enables
-	// index-based pruning.
-	result->AdvanceFile(context);
+
+	// Open each file once: the summary populates the channel/schema registry
+	// (needed for schema_name + JSON decoding) and the chunk index that
+	// partitioning and per-thread pruning are built from.
+	for (idx_t file_index = 0; file_index < result->paths.size(); file_index++) {
+		auto file = OpenMcapFile(context, result->paths[file_index]);
+		result->caches.push_back(McapSchemaCache::FromReader(file->reader));
+		BuildPartitions(file_index, file->reader, result->pushdown, result->partitions);
+	}
 
 	return std::move(result);
 }
 
-static unique_ptr<LocalTableFunctionState> McapScanInitLocal(ExecutionContext &, TableFunctionInitInput &,
-                                                             GlobalTableFunctionState *) {
-	return make_uniq<LocalTableFunctionState>();
+static unique_ptr<LocalTableFunctionState> McapScanInitLocal(ExecutionContext &context, TableFunctionInitInput &,
+                                                             GlobalTableFunctionState *gstate_p) {
+	auto result = make_uniq<McapScanLocalState>();
+	auto &gstate = gstate_p->Cast<McapScanGlobalState>();
+	result->NextPartition(context.client, gstate);
+	return std::move(result);
 }
 
 static bool NeedsJson(const McapScanGlobalState &state) {
@@ -213,14 +291,23 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 }
 
 static void McapScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<McapScanGlobalState>();
+	auto &gstate = data.global_state->Cast<McapScanGlobalState>();
+	auto &state = data.local_state->Cast<McapScanLocalState>();
 	idx_t count = 0;
-	auto decode_json = NeedsJson(state);
+	auto decode_json = NeedsJson(gstate);
 
 	while (count < STANDARD_VECTOR_SIZE) {
-		if (!state.iterator.has_value() || *state.iterator == *state.end) {
-			if (!state.AdvanceFile(context)) {
-				break; // every file consumed
+		if (!state.iterator.has_value()) {
+			break; // this thread never got a partition
+		}
+		if (*state.iterator == *state.end) {
+			gstate.finished_partitions.fetch_add(1);
+			if (!state.NextPartition(context, gstate)) {
+				// Clear the exhausted iterator so a later call on this local state
+				// does not count the same partition as finished again.
+				state.iterator.reset();
+				state.end.reset();
+				break; // every partition consumed
 			}
 			continue;
 		}
@@ -228,15 +315,15 @@ static void McapScanFunction(ClientContext &context, TableFunctionInput &data, D
 		// advanced, so read everything we need before the ++ at the end of the loop.
 		const auto &message_view = **state.iterator;
 
-		const auto *channel_info = state.cache.Lookup(message_view.message.channelId);
+		const auto *channel_info = state.cache->Lookup(message_view.message.channelId);
 		std::optional<std::string> json_payload;
 		if (decode_json && channel_info) {
 			json_payload =
 			    DecodePayloadJson(*channel_info, message_view.message, state.protobuf.get(), state.ros2.get());
 		}
 
-		for (idx_t output_col = 0; output_col < state.column_ids.size(); output_col++) {
-			WriteProjectedColumn(output, output_col, count, state.column_ids[output_col], message_view, channel_info,
+		for (idx_t output_col = 0; output_col < gstate.column_ids.size(); output_col++) {
+			WriteProjectedColumn(output, output_col, count, gstate.column_ids[output_col], message_view, channel_info,
 			                     json_payload, state.current_filename);
 		}
 		count++;

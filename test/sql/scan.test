@@ -32,3 +32,17 @@ query I
 SELECT count(*) FROM 'test/mcap/sample.mcap';
 ----
 2
+
+# Parallel partitioned scan: same totals with multiple threads.
+statement ok
+PRAGMA threads=4;
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/*.mcap');
+----
+12
+
+query II
+SELECT count(*), count(DISTINCT topic) FROM mcap_scan('test/mcap/ros2.mcap');
+----
+7	5
