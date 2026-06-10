@@ -1,6 +1,7 @@
 #include "mcap_metadata.hpp"
 
 #include "decoder.hpp"
+#include "json_util.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/vector.hpp"

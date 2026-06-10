@@ -90,6 +90,7 @@ set(EXTENSION_SOURCES
     src/schema_cache.cpp
     src/pushdown.cpp
     src/decoder.cpp
+    src/json_util.cpp
     src/protobuf_decoder.cpp
     src/ros2_decoder.cpp
     src/views/rosout.cpp)

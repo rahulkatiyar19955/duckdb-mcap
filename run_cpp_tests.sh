@@ -26,7 +26,7 @@ echo ">> compiling C++ unit tests..."
     -I mcap_repo/cpp/mcap/include \
     -I duckdb/src/include \
     -I duckdb/third_party/catch \
-    test/cpp/test_pushdown.cpp src/pushdown.cpp \
+    test/cpp/test_pushdown.cpp test/cpp/test_json_util.cpp src/pushdown.cpp src/json_util.cpp \
     -L "${LIB_DIR}" -lduckdb \
     -Wl,-rpath,"${LIB_DIR}" \
     -o "${OUT}"
