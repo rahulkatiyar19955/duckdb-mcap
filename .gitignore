@@ -5,3 +5,4 @@ __pycache__/
 *.duckdb_extension
 .cache/
 vcpkg/
+duckdb_unittest_tempdir/

@@ -16,7 +16,7 @@ UNITTEST=build/release/test/unittest
 FIXTURE=test/mcap/sample.mcap
 
 # --- ensure the fixtures exist ---
-if [[ ! -f "$FIXTURE" || ! -f test/mcap/protobuf.mcap || ! -f test/mcap/ros2.mcap ]]; then
+if [[ ! -f "$FIXTURE" || ! -f test/mcap/protobuf.mcap || ! -f test/mcap/ros2.mcap || ! -f test/mcap/sample_lz4.mcap || ! -f test/mcap/empty.mcap ]]; then
     echo ">> fixtures missing; generating..."
     if [[ -f .venv/bin/activate ]]; then
         # shellcheck disable=SC1091

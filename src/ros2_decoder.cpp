@@ -339,11 +339,12 @@ bool AppendPrimitive(CdrReader &r, const std::string &type, std::string &out) {
 		uint8_t v;
 		if (!r.ReadPrimitive(v)) return false;
 		out += v ? "true" : "false";
-	} else if (type == "int8" || type == "char") {
+	} else if (type == "int8") {
 		int8_t v;
 		if (!r.ReadPrimitive(v)) return false;
 		out += std::to_string(static_cast<int>(v));
-	} else if (type == "uint8" || type == "byte") {
+	} else if (type == "uint8" || type == "byte" || type == "char") {
+		// ROS2 treats both `char` and `byte` as uint8-valued.
 		uint8_t v;
 		if (!r.ReadPrimitive(v)) return false;
 		out += std::to_string(static_cast<unsigned>(v));
@@ -383,11 +384,13 @@ bool AppendPrimitive(CdrReader &r, const std::string &type, std::string &out) {
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%.17g", v);
 		out += buf;
-	} else if (type == "string" || type == "wstring") {
+	} else if (type == "string") {
 		std::string s;
 		if (!r.ReadString(s)) return false;
 		JsonEscape(s, out);
 	} else {
+		// wstring (UTF-16 CDR, vendor-ambiguous layout) and anything unknown:
+		// fail the decode so the row gets NULL instead of misparsed output.
 		return false;
 	}
 	return r.ok;
@@ -462,13 +465,18 @@ std::optional<std::string> Ros2Decoder::Decode(const McapChannelInfo &channel, c
 		return std::nullopt;
 	}
 
-	// CDR encapsulation header: [0x00, endianness, options(2)]. LE if byte 1 == 1.
+	// CDR encapsulation header: [rep id high, rep id low, options(2)]. Only plain
+	// XCDR1 (0x0000 = BE, 0x0001 = LE) is supported: XCDR2 and PL_CDR use different
+	// alignment/layout rules and would silently misparse, so reject anything else.
 	if (message.dataSize < 4) {
 		return std::nullopt;
 	}
 	CdrReader reader;
 	reader.data = reinterpret_cast<const uint8_t *>(message.data);
 	reader.size = static_cast<size_t>(message.dataSize);
+	if (reader.data[0] != 0 || reader.data[1] > 1) {
+		return std::nullopt;
+	}
 	reader.little_endian = (reader.data[1] == 1);
 	reader.pos = 4; // skip encapsulation header
 

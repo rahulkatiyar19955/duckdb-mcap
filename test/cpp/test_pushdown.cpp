@@ -27,7 +27,8 @@ namespace {
 
 using TopicSet = std::unordered_set<std::string>;
 
-//! micros -> nanos factor (MCAP timestamps are nanoseconds, DuckDB TIMESTAMP is micros).
+//! micros -> nanos factor: helpers below take microseconds for readability and
+//! build TIMESTAMP_NS constants (the scan's timestamp column type) in nanoseconds.
 constexpr mcap::Timestamp NS = 1000;
 
 unique_ptr<TableFilter> TopicEqual(const std::string &topic) {
@@ -48,7 +49,7 @@ unique_ptr<TableFilter> TopicGreaterThan(const std::string &topic) {
 }
 
 unique_ptr<TableFilter> TsCompare(ExpressionType cmp, int64_t micros) {
-	return make_uniq<ConstantFilter>(cmp, Value::TIMESTAMP(timestamp_t(micros)));
+	return make_uniq<ConstantFilter>(cmp, Value::TIMESTAMPNS(timestamp_ns_t(micros * 1000)));
 }
 
 unique_ptr<ConjunctionAndFilter> And(unique_ptr<TableFilter> a, unique_ptr<TableFilter> b) {
@@ -165,16 +166,37 @@ TEST_CASE("timestamp OR with an unrepresentable branch is not bounded", "[pushdo
 	REQUIRE_FALSE(CollectTimeRange(start, end, *filter));
 }
 
-TEST_CASE("timestamp bound bump saturates instead of overflowing", "[pushdown][timestamp]") {
-	// A timestamp beyond mcap::MaxTime is capped to MaxTime; the +1us bump on a '>'
-	// bound must saturate at MaxTime rather than wrapping to a tiny value (which would
-	// invert the range).
-	auto filter = make_uniq<ConstantFilter>(ExpressionType::COMPARE_GREATERTHAN,
-	                                         Value::TIMESTAMP(timestamp_t(9000000000000000000LL)));
+TEST_CASE("non-NS timestamp constants convert via cast", "[pushdown][timestamp]") {
+	// A plain TIMESTAMP (microsecond) constant is cast to nanoseconds.
+	auto filter =
+	    make_uniq<ConstantFilter>(ExpressionType::COMPARE_GREATERTHANOREQUALTO, Value::TIMESTAMP(timestamp_t(1500)));
 	mcap::Timestamp start = 0;
 	mcap::Timestamp end = 0;
 	REQUIRE(CollectTimeRange(start, end, *filter));
-	REQUIRE(start == mcap::MaxTime);
+	REQUIRE(start == 1500 * NS);
+	REQUIRE(end == mcap::MaxTime);
+}
+
+TEST_CASE("unconvertible timestamp constants leave the window unrestricted", "[pushdown][timestamp]") {
+	// A microsecond timestamp too large for int64 nanoseconds has no faithful NS
+	// representation; the predicate must be treated as unrepresentable rather than
+	// silently clamped into a wrong (row-dropping) window.
+	auto filter = make_uniq<ConstantFilter>(ExpressionType::COMPARE_GREATERTHAN,
+	                                        Value::TIMESTAMP(timestamp_t(9000000000000000000LL)));
+	mcap::Timestamp start = 0;
+	mcap::Timestamp end = 0;
+	REQUIRE_FALSE(CollectTimeRange(start, end, *filter));
+}
+
+TEST_CASE("timestamp bound bump never inverts at the int64 ceiling", "[pushdown][timestamp]") {
+	// '>' on the largest representable NS timestamp: the +1ns bump must not wrap.
+	auto max_ns = std::numeric_limits<int64_t>::max();
+	auto filter =
+	    make_uniq<ConstantFilter>(ExpressionType::COMPARE_GREATERTHAN, Value::TIMESTAMPNS(timestamp_ns_t(max_ns)));
+	mcap::Timestamp start = 0;
+	mcap::Timestamp end = 0;
+	REQUIRE(CollectTimeRange(start, end, *filter));
+	REQUIRE(start == static_cast<mcap::Timestamp>(max_ns) + 1);
 	REQUIRE(end == mcap::MaxTime);
 	REQUIRE(start <= end);
 }

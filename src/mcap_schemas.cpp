@@ -5,18 +5,13 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "mcap_file.hpp"
 
 #include <mcap/reader.hpp>
 
 namespace duckdb {
 
 namespace {
-
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
 
 struct McapSchemasBindData : public TableFunctionData {
 	explicit McapSchemasBindData(string path_p) : path(std::move(path_p)) {
@@ -66,13 +61,12 @@ static unique_ptr<FunctionData> SchemasBind(ClientContext &, TableFunctionBindIn
 	return make_uniq<McapSchemasBindData>(input.inputs[0].GetValue<string>());
 }
 
-static unique_ptr<GlobalTableFunctionState> SchemasInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> SchemasInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapSchemasBindData>();
 	auto result = make_uniq<SchemasGlobalState>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	for (auto &entry : reader.schemas()) {
 		auto schema = entry.second;

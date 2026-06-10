@@ -1,11 +1,15 @@
 #include "mcap_metadata.hpp"
 
 #include "decoder.hpp"
+#include "json_util.hpp"
+#include "mcap_file.hpp"
+#include "mcap_time.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "ros2_decoder.hpp"
 #include "schema_cache.hpp"
 
 #include <mcap/reader.hpp>
@@ -33,8 +37,9 @@ struct RosoutBindData : public TableFunctionData {
 };
 
 struct RosoutGlobalState : public GlobalTableFunctionState {
-	mcap::McapReader reader;
+	unique_ptr<McapFile> file;
 	McapSchemaCache cache;
+	Ros2Decoder ros2;
 	unique_ptr<mcap::LinearMessageView> view;
 	std::optional<mcap::LinearMessageView::Iterator> iterator;
 	std::optional<mcap::LinearMessageView::Iterator> end;
@@ -44,16 +49,6 @@ struct RosoutGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static timestamp_t ToDuckTimestamp(mcap::Timestamp timestamp_ns) {
-	return Timestamp::FromEpochMicroSeconds(static_cast<int64_t>(timestamp_ns / 1000));
-}
-
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
-
 static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
@@ -61,7 +56,7 @@ static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInp
 	}
 
 	names.emplace_back("timestamp");
-	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	names.emplace_back("severity");
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("node");
@@ -72,13 +67,12 @@ static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInp
 	return make_uniq<RosoutBindData>(input.inputs[0].GetValue<string>());
 }
 
-static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<RosoutBindData>();
 	auto result = make_uniq<RosoutGlobalState>();
 
-	ThrowIfMcapError(result->reader.open(bind.path), bind.path);
-	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
-	result->cache = McapSchemaCache::FromReader(result->reader);
+	result->file = OpenMcapFile(context, bind.path);
+	result->cache = McapSchemaCache::FromReader(result->file->reader);
 
 	mcap::ReadMessageOptions options;
 	options.topicFilter = [](std::string_view topic) {
@@ -89,10 +83,33 @@ static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, Ta
 			throw IOException("MCAP rosout scan failed: %s", status.message);
 		}
 	};
-	result->view = make_uniq<mcap::LinearMessageView>(result->reader.readMessages(on_problem, options));
+	result->view = make_uniq<mcap::LinearMessageView>(result->file->reader.readMessages(on_problem, options));
 	result->iterator.emplace(result->view->begin());
 	result->end.emplace(result->view->end());
 	return std::move(result);
+}
+
+//! Map rcl_interfaces/msg/Log numeric levels to names; pass anything else through.
+static std::optional<std::string> MapSeverity(std::optional<std::string> raw) {
+	if (!raw.has_value()) {
+		return raw;
+	}
+	if (*raw == "10") {
+		return std::string("DEBUG");
+	}
+	if (*raw == "20") {
+		return std::string("INFO");
+	}
+	if (*raw == "30") {
+		return std::string("WARN");
+	}
+	if (*raw == "40") {
+		return std::string("ERROR");
+	}
+	if (*raw == "50") {
+		return std::string("FATAL");
+	}
+	return raw;
 }
 
 static void SetOptionalString(Vector &vector, idx_t row, const std::optional<std::string> &value) {
@@ -112,21 +129,27 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 		const auto &message_view = **state.iterator;
 
 		auto channel_info = state.cache.Lookup(message_view.message.channelId);
-		// rosout messages are JSON-encoded; no protobuf/cdr decoder needed here.
+		// Real ROS2 bags record /rosout as CDR (rcl_interfaces/msg/Log); Foxglove
+		// style bags use JSON. Both decode here; protobuf rosout does not exist.
 		std::optional<std::string> payload;
 		if (channel_info) {
-			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, nullptr);
+			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, &state.ros2);
 		}
 
 		auto &ts_vector = output.data[0];
-		FlatVector::GetData<timestamp_t>(ts_vector)[count] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::GetData<timestamp_t>(ts_vector)[count] = ToTimestampNs(message_view.message.logTime);
 		FlatVector::SetNull(ts_vector, count, false);
 		if (!payload.has_value()) {
 			FlatVector::SetNull(output.data[1], count, true);
 			FlatVector::SetNull(output.data[2], count, true);
 			FlatVector::SetNull(output.data[3], count, true);
 		} else {
-			SetOptionalString(output.data[1], count, ExtractJsonStringField(*payload, "severity"));
+			// JSON rosout uses "severity"; rcl_interfaces/msg/Log uses numeric "level".
+			auto severity = ExtractJsonStringField(*payload, "severity");
+			if (!severity.has_value()) {
+				severity = ExtractJsonStringField(*payload, "level");
+			}
+			SetOptionalString(output.data[1], count, MapSeverity(std::move(severity)));
 			auto node = ExtractJsonStringField(*payload, "node");
 			if (!node.has_value()) {
 				node = ExtractJsonStringField(*payload, "name");

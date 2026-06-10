@@ -1,0 +1,35 @@
+# name: test/sql/records.test
+# description: mcap_info / mcap_attachments / mcap_metadata record functions
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+query TTII
+SELECT profile, library IS NOT NULL, message_count, (chunk_count > 0)::INT
+FROM mcap_info('test/mcap/sample.mcap');
+----
+json	true	2	1
+
+query TT
+SELECT start, "end" FROM mcap_info('test/mcap/sample.mcap');
+----
+2023-11-14 22:13:20	2023-11-14 22:15:00
+
+query TTIT
+SELECT name, media_type, data_size, data::VARCHAR
+FROM mcap_attachments('test/mcap/sample.mcap');
+----
+notes.txt	text/plain	16	hello attachment
+
+query TT
+SELECT log_time, create_time FROM mcap_attachments('test/mcap/sample.mcap');
+----
+2023-11-14 22:13:20	2023-11-14 22:13:20
+
+query TTT
+SELECT name, key, value FROM mcap_metadata('test/mcap/sample.mcap') ORDER BY key;
+----
+session	site	plant-3
+session	vehicle	amr-7

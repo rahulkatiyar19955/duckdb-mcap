@@ -1,0 +1,40 @@
+# name: test/sql/errors.test
+# description: Error handling and degenerate inputs
+
+require mcap
+
+statement ok
+LOAD 'mcap';
+
+statement error
+SELECT * FROM mcap_scan('test/mcap/does_not_exist.mcap');
+----
+
+statement error
+SELECT * FROM mcap_topics('test/mcap/does_not_exist.mcap');
+----
+
+statement error
+SELECT * FROM mcap_info('test/mcap/does_not_exist.mcap');
+----
+
+# A structurally valid MCAP with no channels/messages scans to zero rows.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/empty.mcap');
+----
+0
+
+query I
+SELECT count(*) FROM mcap_topics('test/mcap/empty.mcap');
+----
+0
+
+query ITT
+SELECT message_count, start, "end" FROM mcap_info('test/mcap/empty.mcap');
+----
+0	NULL	NULL
+
+query I
+SELECT count(*) FROM mcap_attachments('test/mcap/empty.mcap');
+----
+0

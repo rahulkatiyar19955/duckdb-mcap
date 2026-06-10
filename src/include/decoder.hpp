@@ -19,7 +19,4 @@ class Ros2Decoder;
 std::optional<std::string> DecodePayloadJson(const McapChannelInfo &channel, const mcap::Message &message,
                                              ProtobufDecoder *protobuf, Ros2Decoder *ros2);
 
-//! Minimal JSON string-field extractor used by the rosout helper view.
-std::optional<std::string> ExtractJsonStringField(std::string_view json, std::string_view key);
-
 } // namespace duckdb

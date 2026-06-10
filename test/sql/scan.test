@@ -15,3 +15,49 @@ query T
 SELECT topic FROM mcap_scan('test/mcap/sample.mcap') ORDER BY timestamp LIMIT 1;
 ----
 /rosout
+
+# Glob patterns expand to a multi-file scan with a filename column.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/*.mcap');
+----
+14
+
+query I
+SELECT count(DISTINCT filename) FROM mcap_scan('test/mcap/*.mcap');
+----
+4
+
+# Replacement scan: FROM 'x.mcap' works directly.
+query I
+SELECT count(*) FROM 'test/mcap/sample.mcap';
+----
+2
+
+# Parallel partitioned scan: same totals with multiple threads.
+statement ok
+PRAGMA threads=4;
+
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/*.mcap');
+----
+14
+
+query II
+SELECT count(*), count(DISTINCT topic) FROM mcap_scan('test/mcap/ros2.mcap');
+----
+7	5
+
+# LZ4-compressed chunks decode identically to the zstd default.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample_lz4.mcap');
+----
+2
+
+query I
+SELECT count(*) FROM (
+    SELECT topic, payload_json FROM mcap_scan('test/mcap/sample.mcap')
+    INTERSECT
+    SELECT topic, payload_json FROM mcap_scan('test/mcap/sample_lz4.mcap')
+);
+----
+2
