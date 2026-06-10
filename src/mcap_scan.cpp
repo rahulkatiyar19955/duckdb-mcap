@@ -8,6 +8,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "mcap_time.hpp"
 #include "protobuf_decoder.hpp"
 #include "pushdown.hpp"
 #include "ros2_decoder.hpp"
@@ -53,10 +54,6 @@ struct McapScanGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static timestamp_t ToDuckTimestamp(mcap::Timestamp timestamp_ns) {
-	return Timestamp::FromEpochMicroSeconds(static_cast<int64_t>(timestamp_ns / 1000));
-}
-
 static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
 	if (!status.ok()) {
 		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
@@ -76,7 +73,7 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	reader.close();
 
 	names.emplace_back("timestamp");
-	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	names.emplace_back("topic");
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("payload_blob");
@@ -85,6 +82,12 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("payload_json");
 	return_types.emplace_back(LogicalType::JSON());
+	names.emplace_back("publish_time");
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
+	names.emplace_back("sequence");
+	return_types.emplace_back(LogicalTypeId::UINTEGER);
+	names.emplace_back("channel_id");
+	return_types.emplace_back(LogicalTypeId::USMALLINT);
 
 	return make_uniq<McapScanBindData>(std::move(path));
 }
@@ -141,7 +144,19 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 	auto &vector = output.data[output_col];
 	switch (static_cast<McapScanColumn>(column_id)) {
 	case McapScanColumn::TIMESTAMP:
-		FlatVector::GetData<timestamp_t>(vector)[row] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::GetData<timestamp_t>(vector)[row] = ToTimestampNs(message_view.message.logTime);
+		FlatVector::SetNull(vector, row, false);
+		break;
+	case McapScanColumn::PUBLISH_TIME:
+		FlatVector::GetData<timestamp_t>(vector)[row] = ToTimestampNs(message_view.message.publishTime);
+		FlatVector::SetNull(vector, row, false);
+		break;
+	case McapScanColumn::SEQUENCE:
+		FlatVector::GetData<uint32_t>(vector)[row] = message_view.message.sequence;
+		FlatVector::SetNull(vector, row, false);
+		break;
+	case McapScanColumn::CHANNEL_ID:
+		FlatVector::GetData<uint16_t>(vector)[row] = message_view.message.channelId;
 		FlatVector::SetNull(vector, row, false);
 		break;
 	case McapScanColumn::TOPIC:

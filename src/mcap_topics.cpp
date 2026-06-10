@@ -4,6 +4,7 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "mcap_time.hpp"
 #include "schema_cache.hpp"
 
 #include <mcap/reader.hpp>
@@ -11,10 +12,6 @@
 namespace duckdb {
 
 namespace {
-
-static timestamp_t ToDuckTimestamp(mcap::Timestamp timestamp_ns) {
-	return Timestamp::FromEpochMicroSeconds(static_cast<int64_t>(timestamp_ns / 1000));
-}
 
 static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
 	if (!status.ok()) {
@@ -76,9 +73,9 @@ static unique_ptr<FunctionData> PathBind(ClientContext &, TableFunctionBindInput
 	names.emplace_back("count");
 	return_types.emplace_back(LogicalTypeId::UBIGINT);
 	names.emplace_back("start");
-	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	names.emplace_back("end");
-	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	return make_uniq<McapMetadataBindData>(input.inputs[0].GetValue<string>());
 }
 
@@ -149,8 +146,8 @@ static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &, Ta
 		Value end;
 		auto range = ranges.find(entry.first);
 		if (range != ranges.end()) {
-			start = Value::TIMESTAMP(ToDuckTimestamp(range->second.first));
-			end = Value::TIMESTAMP(ToDuckTimestamp(range->second.second));
+			start = Value::TIMESTAMPNS(ToTimestampNs(range->second.first));
+			end = Value::TIMESTAMPNS(ToTimestampNs(range->second.second));
 		}
 		result->rows.push_back({entry.second.topic, entry.second.schema_name, count, start, end});
 	}

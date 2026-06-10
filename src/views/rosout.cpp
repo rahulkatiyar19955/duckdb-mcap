@@ -2,6 +2,7 @@
 
 #include "decoder.hpp"
 #include "json_util.hpp"
+#include "mcap_time.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -47,10 +48,6 @@ struct RosoutGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static timestamp_t ToDuckTimestamp(mcap::Timestamp timestamp_ns) {
-	return Timestamp::FromEpochMicroSeconds(static_cast<int64_t>(timestamp_ns / 1000));
-}
-
 static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
 	if (!status.ok()) {
 		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
@@ -64,7 +61,7 @@ static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInp
 	}
 
 	names.emplace_back("timestamp");
-	return_types.emplace_back(LogicalTypeId::TIMESTAMP);
+	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	names.emplace_back("severity");
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
 	names.emplace_back("node");
@@ -146,7 +143,7 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 		}
 
 		auto &ts_vector = output.data[0];
-		FlatVector::GetData<timestamp_t>(ts_vector)[count] = ToDuckTimestamp(message_view.message.logTime);
+		FlatVector::GetData<timestamp_t>(ts_vector)[count] = ToTimestampNs(message_view.message.logTime);
 		FlatVector::SetNull(ts_vector, count, false);
 		if (!payload.has_value()) {
 			FlatVector::SetNull(output.data[1], count, true);

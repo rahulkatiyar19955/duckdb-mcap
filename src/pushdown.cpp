@@ -1,6 +1,8 @@
 #include "pushdown.hpp"
 
 #include "duckdb/common/enums/expression_type.hpp"
+#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
 #include "duckdb/planner/filter/in_filter.hpp"
@@ -11,20 +13,36 @@
 
 namespace duckdb {
 
-static mcap::Timestamp TimestampValueToNanos(const Value &value) {
-	auto timestamp = value.GetValue<timestamp_t>();
-	if (timestamp.value < 0) {
-		return 0;
+//! Convert a pushed-down filter constant to MCAP nanoseconds. The scan column is
+//! TIMESTAMP_NS so constants normally arrive in nanoseconds already; anything else
+//! is cast. Returns false when no faithful conversion exists (e.g. out-of-range or
+//! infinity sentinels) — the caller must then leave the time window unrestricted.
+static bool TimestampFilterValueToNanos(const Value &value, mcap::Timestamp &out) {
+	if (value.IsNull()) {
+		return false;
 	}
-	// timestamp is microseconds; *1000 gives nanoseconds. Cap at MaxTime so a
-	// sentinel/huge value (e.g. timestamp infinity) does not overflow and wrap.
-	if (static_cast<uint64_t>(timestamp.value) >= mcap::MaxTime / 1000) {
-		return mcap::MaxTime;
+	int64_t nanos;
+	if (value.type().id() == LogicalTypeId::TIMESTAMP_NS) {
+		nanos = TimestampNSValue::Get(value).value;
+	} else {
+		Value cast;
+		string error;
+		try {
+			// DefaultTryCastAs can still throw for some cast pairs (e.g. out-of-range
+			// US -> NS) instead of returning false; both outcomes mean "unbounded".
+			if (!value.DefaultTryCastAs(LogicalType::TIMESTAMP_NS, cast, &error) || cast.IsNull()) {
+				return false;
+			}
+		} catch (...) {
+			return false;
+		}
+		nanos = TimestampNSValue::Get(cast).value;
 	}
-	return static_cast<mcap::Timestamp>(timestamp.value) * 1000;
+	out = nanos < 0 ? 0 : static_cast<mcap::Timestamp>(nanos);
+	return true;
 }
 
-//! Saturating add so the +1us bumps used to widen exclusive/equality bounds never
+//! Saturating add so the +1ns bumps used to widen exclusive/equality bounds never
 //! overflow mcap::MaxTime and wrap around to a tiny value (which would invert the range).
 static mcap::Timestamp SatAddNanos(mcap::Timestamp t, mcap::Timestamp delta) {
 	return (t > mcap::MaxTime - delta) ? mcap::MaxTime : t + delta;
@@ -106,19 +124,20 @@ bool CollectTimeRange(mcap::Timestamp &start, mcap::Timestamp &end, const TableF
 	switch (filter.filter_type) {
 	case TableFilterType::CONSTANT_COMPARISON: {
 		auto &constant = filter.Cast<ConstantFilter>();
-		if (constant.constant.IsNull()) {
+		mcap::Timestamp nanos;
+		if (!TimestampFilterValueToNanos(constant.constant, nanos)) {
 			return false;
 		}
-		auto nanos = TimestampValueToNanos(constant.constant);
 		start = 0;
 		end = mcap::MaxTime;
+		// MCAP's read window is [start, end): widen exclusive/equality bounds by 1ns.
 		switch (constant.comparison_type) {
 		case ExpressionType::COMPARE_EQUAL:
 			start = nanos;
-			end = SatAddNanos(nanos, 1000);
+			end = SatAddNanos(nanos, 1);
 			return true;
 		case ExpressionType::COMPARE_GREATERTHAN:
-			start = SatAddNanos(nanos, 1000);
+			start = SatAddNanos(nanos, 1);
 			return true;
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
 			start = nanos;
@@ -127,7 +146,7 @@ bool CollectTimeRange(mcap::Timestamp &start, mcap::Timestamp &end, const TableF
 			end = nanos;
 			return true;
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			end = SatAddNanos(nanos, 1000);
+			end = SatAddNanos(nanos, 1);
 			return true;
 		default:
 			return false;
