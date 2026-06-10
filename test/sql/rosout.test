@@ -10,3 +10,11 @@ query TTT
 SELECT severity, node, message FROM rosout('test/mcap/sample.mcap');
 ----
 ERROR	planner	Planner aborted
+
+# CDR-encoded /rosout (rcl_interfaces/msg/Log), as written by real ROS2 bags:
+# numeric levels map to names, node comes from `name`, message from `msg`.
+query TTT
+SELECT severity, node, message FROM rosout('test/mcap/ros2.mcap') ORDER BY timestamp;
+----
+ERROR	planner	Planner aborted (cdr)
+INFO	lidar_driver	Scanner online

@@ -11,17 +11,18 @@ LOAD 'mcap';
 statement ok
 LOAD 'json';
 
-# Root type name comes from the schema.
+# Root type names come from the schemas.
 query T
-SELECT DISTINCT schema_name FROM mcap_scan('test/mcap/ros2.mcap');
+SELECT DISTINCT schema_name FROM mcap_scan('test/mcap/ros2.mcap') ORDER BY 1;
 ----
+rcl_interfaces/msg/Log
 test_msgs/msg/Sample
 
 # LE, BE and the two poison channels: only well-formed XCDR1 rows decode.
 query II
 SELECT count(*), sum(json_valid(payload_json)::INT) FROM mcap_scan('test/mcap/ros2.mcap');
 ----
-5	3
+7	5
 
 # Nested struct fields (header.stamp.sec, header.frame_id), fixed float64[3] array,
 # and trailing string all decode correctly.

@@ -40,6 +40,35 @@ int32 sec
 uint32 nanosec
 """
 
+# rcl_interfaces/msg/Log: what a real ROS2 stack publishes on /rosout.
+LOG_SCHEMA_TEXT = b"""\
+builtin_interfaces/Time stamp
+uint8 level
+string name
+string msg
+string file
+string function
+uint32 line
+
+================================================================================
+MSG: builtin_interfaces/Time
+int32 sec
+uint32 nanosec
+"""
+
+
+def encode_log(sec, nanosec, level, name, msg, file, function, line):
+    w = CdrWriter()
+    w.i32(sec)
+    w.u32(nanosec)
+    w.u8(level)
+    w.string(name)
+    w.string(msg)
+    w.string(file)
+    w.string(function)
+    w.u32(line)
+    return b"\x00\x01\x00\x00" + bytes(w.buf)
+
 
 class CdrWriter:
     """Little-endian CDR body writer with size-based alignment (relative to body start)."""
@@ -50,6 +79,9 @@ class CdrWriter:
     def _align(self, n):
         pad = (-len(self.buf)) % n
         self.buf.extend(b"\x00" * pad)
+
+    def u8(self, v):
+        self.buf.extend(struct.pack("<B", v))
 
     def i32(self, v):
         self._align(4)
@@ -174,6 +206,29 @@ def main() -> None:
             log_time=1_700_000_004_000_000_000,
             publish_time=1_700_000_004_000_000_000,
             data=b"\x00\x07\x00\x00" + encode_sample(104, 0, "odom", [1.0, 2.0, 3.0], "epsilon")[4:],
+        )
+        # CDR-encoded /rosout, as recorded by a real ROS2 bag (rcl_interfaces/msg/Log).
+        log_schema_id = writer.register_schema(
+            name="rcl_interfaces/msg/Log",
+            encoding="ros2msg",
+            data=LOG_SCHEMA_TEXT,
+        )
+        chan_rosout = writer.register_channel(
+            topic="/rosout",
+            message_encoding="cdr",
+            schema_id=log_schema_id,
+        )
+        writer.add_message(
+            channel_id=chan_rosout,
+            log_time=1_700_000_005_000_000_000,
+            publish_time=1_700_000_005_000_000_000,
+            data=encode_log(105, 0, 40, "planner", "Planner aborted (cdr)", "planner.cpp", "plan", 42),
+        )
+        writer.add_message(
+            channel_id=chan_rosout,
+            log_time=1_700_000_006_000_000_000,
+            publish_time=1_700_000_006_000_000_000,
+            data=encode_log(106, 0, 20, "lidar_driver", "Scanner online", "driver.cpp", "init", 7),
         )
         writer.finish()
 

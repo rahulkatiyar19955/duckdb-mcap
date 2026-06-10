@@ -7,6 +7,7 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "ros2_decoder.hpp"
 #include "schema_cache.hpp"
 
 #include <mcap/reader.hpp>
@@ -36,6 +37,7 @@ struct RosoutBindData : public TableFunctionData {
 struct RosoutGlobalState : public GlobalTableFunctionState {
 	mcap::McapReader reader;
 	McapSchemaCache cache;
+	Ros2Decoder ros2;
 	unique_ptr<mcap::LinearMessageView> view;
 	std::optional<mcap::LinearMessageView::Iterator> iterator;
 	std::optional<mcap::LinearMessageView::Iterator> end;
@@ -96,6 +98,29 @@ static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, Ta
 	return std::move(result);
 }
 
+//! Map rcl_interfaces/msg/Log numeric levels to names; pass anything else through.
+static std::optional<std::string> MapSeverity(std::optional<std::string> raw) {
+	if (!raw.has_value()) {
+		return raw;
+	}
+	if (*raw == "10") {
+		return std::string("DEBUG");
+	}
+	if (*raw == "20") {
+		return std::string("INFO");
+	}
+	if (*raw == "30") {
+		return std::string("WARN");
+	}
+	if (*raw == "40") {
+		return std::string("ERROR");
+	}
+	if (*raw == "50") {
+		return std::string("FATAL");
+	}
+	return raw;
+}
+
 static void SetOptionalString(Vector &vector, idx_t row, const std::optional<std::string> &value) {
 	if (!value.has_value()) {
 		FlatVector::SetNull(vector, row, true);
@@ -113,10 +138,11 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 		const auto &message_view = **state.iterator;
 
 		auto channel_info = state.cache.Lookup(message_view.message.channelId);
-		// rosout messages are JSON-encoded; no protobuf/cdr decoder needed here.
+		// Real ROS2 bags record /rosout as CDR (rcl_interfaces/msg/Log); Foxglove
+		// style bags use JSON. Both decode here; protobuf rosout does not exist.
 		std::optional<std::string> payload;
 		if (channel_info) {
-			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, nullptr);
+			payload = DecodePayloadJson(*channel_info, message_view.message, nullptr, &state.ros2);
 		}
 
 		auto &ts_vector = output.data[0];
@@ -127,7 +153,12 @@ static void RosoutScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 			FlatVector::SetNull(output.data[2], count, true);
 			FlatVector::SetNull(output.data[3], count, true);
 		} else {
-			SetOptionalString(output.data[1], count, ExtractJsonStringField(*payload, "severity"));
+			// JSON rosout uses "severity"; rcl_interfaces/msg/Log uses numeric "level".
+			auto severity = ExtractJsonStringField(*payload, "severity");
+			if (!severity.has_value()) {
+				severity = ExtractJsonStringField(*payload, "level");
+			}
+			SetOptionalString(output.data[1], count, MapSeverity(std::move(severity)));
 			auto node = ExtractJsonStringField(*payload, "node");
 			if (!node.has_value()) {
 				node = ExtractJsonStringField(*payload, "name");
