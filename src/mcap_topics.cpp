@@ -42,8 +42,9 @@ struct TopicRow {
 	string topic;
 	string type;
 	uint64_t count;
-	timestamp_t start;
-	timestamp_t end;
+	//! Per-topic time range; NULL when the file carries no message indexes.
+	Value start;
+	Value end;
 };
 
 struct ChannelRow {
@@ -107,6 +108,35 @@ static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &, Ta
 
 	auto cache = McapSchemaCache::FromReader(reader);
 	auto stats = reader.statistics();
+
+	// Exact per-channel time ranges from the message-index records referenced by
+	// each chunk index (cheap random reads; no message decompression). Statistics
+	// only carry file-wide bounds, which are wrong to present per topic.
+	std::unordered_map<mcap::ChannelId, std::pair<mcap::Timestamp, mcap::Timestamp>> ranges;
+	auto *source = reader.dataSource();
+	for (auto &chunk_index : reader.chunkIndexes()) {
+		for (auto &offset_entry : chunk_index.messageIndexOffsets) {
+			mcap::RecordReader record_reader(*source, offset_entry.second);
+			auto record = record_reader.next();
+			if (!record.has_value() || !record_reader.status().ok()) {
+				continue;
+			}
+			mcap::MessageIndex message_index;
+			if (!mcap::McapReader::ParseMessageIndex(*record, &message_index).ok()) {
+				continue;
+			}
+			for (auto &rec : message_index.records) {
+				auto range = ranges.find(message_index.channelId);
+				if (range == ranges.end()) {
+					ranges.emplace(message_index.channelId, std::make_pair(rec.first, rec.first));
+				} else {
+					range->second.first = std::min(range->second.first, rec.first);
+					range->second.second = std::max(range->second.second, rec.first);
+				}
+			}
+		}
+	}
+
 	for (auto &entry : cache.channels) {
 		auto count = uint64_t(0);
 		if (stats.has_value()) {
@@ -115,9 +145,14 @@ static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &, Ta
 				count = count_entry->second;
 			}
 		}
-		result->rows.push_back({entry.second.topic, entry.second.schema_name, count,
-		                        stats.has_value() ? ToDuckTimestamp(stats->messageStartTime) : timestamp_t(0),
-		                        stats.has_value() ? ToDuckTimestamp(stats->messageEndTime) : timestamp_t(0)});
+		Value start;
+		Value end;
+		auto range = ranges.find(entry.first);
+		if (range != ranges.end()) {
+			start = Value::TIMESTAMP(ToDuckTimestamp(range->second.first));
+			end = Value::TIMESTAMP(ToDuckTimestamp(range->second.second));
+		}
+		result->rows.push_back({entry.second.topic, entry.second.schema_name, count, start, end});
 	}
 	return std::move(result);
 }
@@ -145,8 +180,8 @@ static void TopicsScan(ClientContext &, TableFunctionInput &data, DataChunk &out
 		output.SetValue(0, count, Value(row.topic));
 		output.SetValue(1, count, Value(row.type));
 		output.SetValue(2, count, Value::UBIGINT(row.count));
-		output.SetValue(3, count, Value::TIMESTAMP(row.start));
-		output.SetValue(4, count, Value::TIMESTAMP(row.end));
+		output.SetValue(3, count, row.start);
+		output.SetValue(4, count, row.end);
 		count++;
 	}
 	output.SetCardinality(count);

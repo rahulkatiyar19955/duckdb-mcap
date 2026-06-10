@@ -20,3 +20,10 @@ query T
 SELECT name FROM mcap_schemas('test/mcap/sample.mcap') ORDER BY id LIMIT 1;
 ----
 foxglove.Log
+
+# Per-topic time ranges come from message indexes, not file-wide statistics.
+query TTT
+SELECT topic, start, "end" FROM mcap_topics('test/mcap/sample.mcap') ORDER BY topic;
+----
+/odom	2023-11-14 22:15:00	2023-11-14 22:15:00
+/rosout	2023-11-14 22:13:20	2023-11-14 22:13:20
