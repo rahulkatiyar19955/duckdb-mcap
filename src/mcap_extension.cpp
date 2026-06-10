@@ -13,6 +13,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetMcapTopicsFunction());
 	loader.RegisterFunction(GetMcapSchemasFunction());
 	loader.RegisterFunction(GetMcapChannelsFunction());
+	loader.RegisterFunction(GetMcapInfoFunction());
+	loader.RegisterFunction(GetMcapAttachmentsFunction());
+	loader.RegisterFunction(GetMcapMetadataFunction());
 	loader.RegisterFunction(GetRosoutFunction());
 }
 

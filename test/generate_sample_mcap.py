@@ -38,6 +38,14 @@ def main() -> None:
             message_encoding="json",
             schema_id=schema_id,
         )
+        writer.add_attachment(
+            create_time=1_700_000_000_000_000_000,
+            log_time=1_700_000_000_000_000_000,
+            name="notes.txt",
+            media_type="text/plain",
+            data=b"hello attachment",
+        )
+        writer.add_metadata("session", {"vehicle": "amr-7", "site": "plant-3"})
         writer.add_message(
             channel_id=rosout,
             log_time=1_700_000_000_000_000_000,
