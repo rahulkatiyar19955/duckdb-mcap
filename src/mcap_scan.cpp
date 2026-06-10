@@ -8,6 +8,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/enums/file_glob_options.hpp"
 #include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "protobuf_decoder.hpp"
@@ -17,6 +18,7 @@
 
 #include <mcap/reader.hpp>
 
+#include <algorithm>
 #include <optional>
 
 namespace duckdb {
@@ -24,22 +26,26 @@ namespace duckdb {
 namespace {
 
 struct McapScanBindData : public TableFunctionData {
-	explicit McapScanBindData(string path_p) : path(std::move(path_p)) {
+	explicit McapScanBindData(vector<string> paths_p) : paths(std::move(paths_p)) {
 	}
 
-	string path;
+	//! Expanded file list (glob patterns resolved at bind time).
+	vector<string> paths;
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<McapScanBindData>(path);
+		return make_uniq<McapScanBindData>(paths);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<McapScanBindData>();
-		return path == other.path;
+		return paths == other.paths;
 	}
 };
 
 struct McapScanGlobalState : public GlobalTableFunctionState {
+	vector<string> paths;
+	idx_t next_file = 0;
+	string current_filename;
 	unique_ptr<McapFile> file;
 	McapSchemaCache cache;
 	unique_ptr<mcap::LinearMessageView> view;
@@ -47,8 +53,33 @@ struct McapScanGlobalState : public GlobalTableFunctionState {
 	std::optional<mcap::LinearMessageView::Iterator> end;
 	vector<column_t> column_ids;
 	McapPushdown pushdown;
-	ProtobufDecoder protobuf;
-	Ros2Decoder ros2;
+	//! Decoders cache parsed schemas by per-file schema id, so they are recreated
+	//! for each file rather than shared across the whole scan.
+	unique_ptr<ProtobufDecoder> protobuf;
+	unique_ptr<Ros2Decoder> ros2;
+
+	//! Open the next file in the list (resetting per-file caches/decoders).
+	//! Returns false when every file has been consumed.
+	bool AdvanceFile(ClientContext &context) {
+		if (next_file >= paths.size()) {
+			return false;
+		}
+		current_filename = paths[next_file++];
+		file = OpenMcapFile(context, current_filename);
+		cache = McapSchemaCache::FromReader(file->reader);
+		protobuf = make_uniq<ProtobufDecoder>();
+		ros2 = make_uniq<Ros2Decoder>();
+		auto options = ToReadMessageOptions(pushdown);
+		auto on_problem = [](const mcap::Status &status) {
+			if (!status.ok()) {
+				throw IOException("MCAP scan failed: %s", status.message);
+			}
+		};
+		view = make_uniq<mcap::LinearMessageView>(file->reader.readMessages(on_problem, options));
+		iterator.emplace(view->begin());
+		end.emplace(view->end());
+		return true;
+	}
 
 	idx_t MaxThreads() const override {
 		return 1;
@@ -61,8 +92,13 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 		throw BinderException("mcap_scan(path) requires a single non-null path argument");
 	}
 
-	auto path = input.inputs[0].GetValue<string>();
-	OpenMcapFile(context, path); // validate the file is readable MCAP at bind time
+	auto pattern = input.inputs[0].GetValue<string>();
+	auto &fs = FileSystem::GetFileSystem(context);
+	vector<string> paths;
+	for (auto &file : fs.GlobFiles(pattern, context, FileGlobOptions::DISALLOW_EMPTY)) {
+		paths.push_back(file.path);
+	}
+	std::sort(paths.begin(), paths.end());
 
 	names.emplace_back("timestamp");
 	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
@@ -80,8 +116,10 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 	return_types.emplace_back(LogicalTypeId::UINTEGER);
 	names.emplace_back("channel_id");
 	return_types.emplace_back(LogicalTypeId::USMALLINT);
+	names.emplace_back("filename");
+	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
-	return make_uniq<McapScanBindData>(std::move(path));
+	return make_uniq<McapScanBindData>(std::move(paths));
 }
 
 static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
@@ -94,22 +132,12 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &co
 		}
 	}
 
-	// OpenMcapFile reads the summary too: it populates the channel/schema registry
-	// (needed for schema_name + JSON decoding) and enables index-based pruning.
-	result->file = OpenMcapFile(context, bind.path);
-
-	result->cache = McapSchemaCache::FromReader(result->file->reader);
+	result->paths = bind.paths;
 	result->pushdown = ExtractMcapPushdown(input);
-
-	auto options = ToReadMessageOptions(result->pushdown);
-	auto on_problem = [](const mcap::Status &status) {
-		if (!status.ok()) {
-			throw IOException("MCAP scan failed: %s", status.message);
-		}
-	};
-	result->view = make_uniq<mcap::LinearMessageView>(result->file->reader.readMessages(on_problem, options));
-	result->iterator.emplace(result->view->begin());
-	result->end.emplace(result->view->end());
+	// OpenMcapFile (inside AdvanceFile) reads each file's summary: it populates the
+	// channel/schema registry (needed for schema_name + JSON decoding) and enables
+	// index-based pruning.
+	result->AdvanceFile(context);
 
 	return std::move(result);
 }
@@ -130,7 +158,7 @@ static bool NeedsJson(const McapScanGlobalState &state) {
 
 static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row, column_t column_id,
                                  const mcap::MessageView &message_view, const McapChannelInfo *channel_info,
-                                 const std::optional<std::string> &json_payload) {
+                                 const std::optional<std::string> &json_payload, const string &filename) {
 	auto &vector = output.data[output_col];
 	switch (static_cast<McapScanColumn>(column_id)) {
 	case McapScanColumn::TIMESTAMP:
@@ -147,6 +175,10 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 		break;
 	case McapScanColumn::CHANNEL_ID:
 		FlatVector::GetData<uint16_t>(vector)[row] = message_view.message.channelId;
+		FlatVector::SetNull(vector, row, false);
+		break;
+	case McapScanColumn::FILENAME:
+		FlatVector::GetData<string_t>(vector)[row] = StringVector::AddString(vector, filename);
 		FlatVector::SetNull(vector, row, false);
 		break;
 	case McapScanColumn::TOPIC:
@@ -180,12 +212,18 @@ static void WriteProjectedColumn(DataChunk &output, idx_t output_col, idx_t row,
 	}
 }
 
-static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChunk &output) {
+static void McapScanFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<McapScanGlobalState>();
 	idx_t count = 0;
 	auto decode_json = NeedsJson(state);
 
-	while (count < STANDARD_VECTOR_SIZE && *state.iterator != *state.end) {
+	while (count < STANDARD_VECTOR_SIZE) {
+		if (!state.iterator.has_value() || *state.iterator == *state.end) {
+			if (!state.AdvanceFile(context)) {
+				break; // every file consumed
+			}
+			continue;
+		}
 		// NOTE: message_view (and message.data) is only valid until the iterator is
 		// advanced, so read everything we need before the ++ at the end of the loop.
 		const auto &message_view = **state.iterator;
@@ -193,12 +231,13 @@ static void McapScanFunction(ClientContext &, TableFunctionInput &data, DataChun
 		const auto *channel_info = state.cache.Lookup(message_view.message.channelId);
 		std::optional<std::string> json_payload;
 		if (decode_json && channel_info) {
-			json_payload = DecodePayloadJson(*channel_info, message_view.message, &state.protobuf, &state.ros2);
+			json_payload =
+			    DecodePayloadJson(*channel_info, message_view.message, state.protobuf.get(), state.ros2.get());
 		}
 
 		for (idx_t output_col = 0; output_col < state.column_ids.size(); output_col++) {
 			WriteProjectedColumn(output, output_col, count, state.column_ids[output_col], message_view, channel_info,
-			                     json_payload);
+			                     json_payload, state.current_filename);
 		}
 		count++;
 		++(*state.iterator);

@@ -12,10 +12,11 @@ enum class McapScanColumn : idx_t {
 	PAYLOAD_JSON = 4,
 	PUBLISH_TIME = 5,
 	SEQUENCE = 6,
-	CHANNEL_ID = 7
+	CHANNEL_ID = 7,
+	FILENAME = 8
 };
 
-constexpr idx_t MCAP_SCAN_COLUMN_COUNT = 8;
+constexpr idx_t MCAP_SCAN_COLUMN_COUNT = 9;
 
 TableFunction GetMcapScanFunction();
 
