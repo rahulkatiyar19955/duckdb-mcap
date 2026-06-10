@@ -8,6 +8,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "protobuf_decoder.hpp"
 #include "pushdown.hpp"
@@ -39,7 +40,7 @@ struct McapScanBindData : public TableFunctionData {
 };
 
 struct McapScanGlobalState : public GlobalTableFunctionState {
-	mcap::McapReader reader;
+	unique_ptr<McapFile> file;
 	McapSchemaCache cache;
 	unique_ptr<mcap::LinearMessageView> view;
 	std::optional<mcap::LinearMessageView::Iterator> iterator;
@@ -54,23 +55,14 @@ struct McapScanGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
-
-static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindInput &input,
+static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
 		throw BinderException("mcap_scan(path) requires a single non-null path argument");
 	}
 
 	auto path = input.inputs[0].GetValue<string>();
-
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(path), path);
-	reader.close();
+	OpenMcapFile(context, path); // validate the file is readable MCAP at bind time
 
 	names.emplace_back("timestamp");
 	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
@@ -92,7 +84,7 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &, TableFunctionBindI
 	return make_uniq<McapScanBindData>(std::move(path));
 }
 
-static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapScanBindData>();
 	auto result = make_uniq<McapScanGlobalState>();
 	result->column_ids = input.column_ids;
@@ -102,13 +94,11 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, 
 		}
 	}
 
-	ThrowIfMcapError(result->reader.open(bind.path), bind.path);
+	// OpenMcapFile reads the summary too: it populates the channel/schema registry
+	// (needed for schema_name + JSON decoding) and enables index-based pruning.
+	result->file = OpenMcapFile(context, bind.path);
 
-	// Always read the summary: it populates the channel/schema registry (needed for
-	// schema_name + JSON decoding) and enables index-based chunk/topic pruning.
-	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
-
-	result->cache = McapSchemaCache::FromReader(result->reader);
+	result->cache = McapSchemaCache::FromReader(result->file->reader);
 	result->pushdown = ExtractMcapPushdown(input);
 
 	auto options = ToReadMessageOptions(result->pushdown);
@@ -117,7 +107,7 @@ static unique_ptr<GlobalTableFunctionState> McapScanInitGlobal(ClientContext &, 
 			throw IOException("MCAP scan failed: %s", status.message);
 		}
 	};
-	result->view = make_uniq<mcap::LinearMessageView>(result->reader.readMessages(on_problem, options));
+	result->view = make_uniq<mcap::LinearMessageView>(result->file->reader.readMessages(on_problem, options));
 	result->iterator.emplace(result->view->begin());
 	result->end.emplace(result->view->end());
 

@@ -2,6 +2,7 @@
 
 #include "decoder.hpp"
 #include "json_util.hpp"
+#include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -36,7 +37,7 @@ struct RosoutBindData : public TableFunctionData {
 };
 
 struct RosoutGlobalState : public GlobalTableFunctionState {
-	mcap::McapReader reader;
+	unique_ptr<McapFile> file;
 	McapSchemaCache cache;
 	Ros2Decoder ros2;
 	unique_ptr<mcap::LinearMessageView> view;
@@ -47,12 +48,6 @@ struct RosoutGlobalState : public GlobalTableFunctionState {
 		return 1;
 	}
 };
-
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
 
 static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
@@ -72,13 +67,12 @@ static unique_ptr<FunctionData> RosoutBind(ClientContext &, TableFunctionBindInp
 	return make_uniq<RosoutBindData>(input.inputs[0].GetValue<string>());
 }
 
-static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<RosoutBindData>();
 	auto result = make_uniq<RosoutGlobalState>();
 
-	ThrowIfMcapError(result->reader.open(bind.path), bind.path);
-	ThrowIfMcapError(result->reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
-	result->cache = McapSchemaCache::FromReader(result->reader);
+	result->file = OpenMcapFile(context, bind.path);
+	result->cache = McapSchemaCache::FromReader(result->file->reader);
 
 	mcap::ReadMessageOptions options;
 	options.topicFilter = [](std::string_view topic) {
@@ -89,7 +83,7 @@ static unique_ptr<GlobalTableFunctionState> RosoutInitGlobal(ClientContext &, Ta
 			throw IOException("MCAP rosout scan failed: %s", status.message);
 		}
 	};
-	result->view = make_uniq<mcap::LinearMessageView>(result->reader.readMessages(on_problem, options));
+	result->view = make_uniq<mcap::LinearMessageView>(result->file->reader.readMessages(on_problem, options));
 	result->iterator.emplace(result->view->begin());
 	result->end.emplace(result->view->end());
 	return std::move(result);

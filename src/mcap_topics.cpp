@@ -4,6 +4,7 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "schema_cache.hpp"
 
@@ -12,12 +13,6 @@
 namespace duckdb {
 
 namespace {
-
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
 
 struct McapMetadataBindData : public TableFunctionData {
 	explicit McapMetadataBindData(string path_p) : path(std::move(path_p)) {
@@ -95,13 +90,12 @@ static unique_ptr<FunctionData> ChannelsBind(ClientContext &, TableFunctionBindI
 	return make_uniq<McapMetadataBindData>(input.inputs[0].GetValue<string>());
 }
 
-static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapMetadataBindData>();
 	auto result = make_uniq<VectorGlobalState<TopicRow>>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	auto cache = McapSchemaCache::FromReader(reader);
 	auto stats = reader.statistics();
@@ -154,13 +148,12 @@ static unique_ptr<GlobalTableFunctionState> TopicsInitGlobal(ClientContext &, Ta
 	return std::move(result);
 }
 
-static unique_ptr<GlobalTableFunctionState> ChannelsInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> ChannelsInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapMetadataBindData>();
 	auto result = make_uniq<VectorGlobalState<ChannelRow>>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	for (auto &entry : reader.channels()) {
 		auto channel = entry.second;

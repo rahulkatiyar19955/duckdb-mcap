@@ -89,6 +89,7 @@ set(EXTENSION_SOURCES
     src/mcap_schemas.cpp
     src/mcap_records.cpp
     src/schema_cache.cpp
+    src/mcap_file.cpp
     src/pushdown.cpp
     src/decoder.cpp
     src/json_util.cpp

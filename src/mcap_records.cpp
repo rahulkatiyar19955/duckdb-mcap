@@ -4,6 +4,7 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
+#include "mcap_file.hpp"
 #include "mcap_time.hpp"
 
 #include <mcap/reader.hpp>
@@ -11,12 +12,6 @@
 namespace duckdb {
 
 namespace {
-
-static void ThrowIfMcapError(const mcap::Status &status, const string &path) {
-	if (!status.ok()) {
-		throw IOException("Failed to read MCAP file '%s': %s", path, status.message);
-	}
-}
 
 struct McapRecordsBindData : public TableFunctionData {
 	explicit McapRecordsBindData(string path_p) : path(std::move(path_p)) {
@@ -92,13 +87,12 @@ static unique_ptr<FunctionData> InfoBind(ClientContext &, TableFunctionBindInput
 	return SinglePathBind(input, "mcap_info");
 }
 
-static unique_ptr<GlobalTableFunctionState> InfoInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> InfoInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapRecordsBindData>();
 	auto result = make_uniq<ValueRowsGlobalState>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	auto &header = reader.header();
 	auto &stats = reader.statistics();
@@ -143,13 +137,12 @@ static unique_ptr<FunctionData> AttachmentsBind(ClientContext &, TableFunctionBi
 	return SinglePathBind(input, "mcap_attachments");
 }
 
-static unique_ptr<GlobalTableFunctionState> AttachmentsInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> AttachmentsInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapRecordsBindData>();
 	auto result = make_uniq<ValueRowsGlobalState>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	for (auto &entry : reader.attachmentIndexes()) {
 		auto &index = entry.second;
@@ -190,13 +183,12 @@ static unique_ptr<FunctionData> MetadataBind(ClientContext &, TableFunctionBindI
 	return SinglePathBind(input, "mcap_metadata");
 }
 
-static unique_ptr<GlobalTableFunctionState> MetadataInitGlobal(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> MetadataInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind = input.bind_data->Cast<McapRecordsBindData>();
 	auto result = make_uniq<ValueRowsGlobalState>();
 
-	mcap::McapReader reader;
-	ThrowIfMcapError(reader.open(bind.path), bind.path);
-	ThrowIfMcapError(reader.readSummary(mcap::ReadSummaryMethod::AllowFallbackScan), bind.path);
+	auto file = OpenMcapFile(context, bind.path);
+	auto &reader = file->reader;
 
 	for (auto &entry : reader.metadataIndexes()) {
 		auto &index = entry.second;
