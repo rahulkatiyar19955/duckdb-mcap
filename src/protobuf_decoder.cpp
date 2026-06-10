@@ -6,6 +6,8 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/util/json_util.h>
 
+#include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace duckdb {
@@ -18,8 +20,31 @@ struct ProtobufDecoder::Impl {
 	gp::DynamicMessageFactory factory;
 	//! Schema ids whose FileDescriptorSet has already been added to the pool.
 	std::unordered_set<mcap::SchemaId> loaded_schemas;
+	//! One reusable dynamic message per schema id, so per-row decoding is a
+	//! Clear()+ParseFromArray instead of a descriptor lookup plus an allocation.
+	//! nullptr entries mark schemas that failed to resolve (avoid re-trying per row).
+	std::unordered_map<mcap::SchemaId, std::unique_ptr<gp::Message>> instances;
 
 	Impl() : pool(&db) {
+	}
+
+	//! Resolve (once per schema id) the reusable message instance for a channel.
+	gp::Message *GetInstance(const McapChannelInfo &channel) {
+		auto cached = instances.find(channel.schema_id);
+		if (cached != instances.end()) {
+			return cached->second.get();
+		}
+		std::unique_ptr<gp::Message> instance;
+		const gp::Descriptor *descriptor = pool.FindMessageTypeByName(channel.schema_name);
+		if (descriptor == nullptr && LoadSchema(channel)) {
+			descriptor = pool.FindMessageTypeByName(channel.schema_name);
+		}
+		if (descriptor != nullptr) {
+			instance.reset(factory.GetPrototype(descriptor)->New());
+		}
+		auto *result = instance.get();
+		instances.emplace(channel.schema_id, std::move(instance));
+		return result;
 	}
 
 	//! Add the schema's FileDescriptorSet to the pool (idempotent per schema id).
@@ -56,18 +81,11 @@ std::optional<std::string> ProtobufDecoder::Decode(const McapChannelInfo &channe
 		return std::nullopt;
 	}
 
-	const gp::Descriptor *descriptor = impl->pool.FindMessageTypeByName(channel.schema_name);
-	if (descriptor == nullptr) {
-		if (!impl->LoadSchema(channel)) {
-			return std::nullopt;
-		}
-		descriptor = impl->pool.FindMessageTypeByName(channel.schema_name);
-		if (descriptor == nullptr) {
-			return std::nullopt;
-		}
+	auto *proto = impl->GetInstance(channel);
+	if (proto == nullptr) {
+		return std::nullopt;
 	}
-
-	std::unique_ptr<gp::Message> proto(impl->factory.GetPrototype(descriptor)->New());
+	proto->Clear();
 	if (!proto->ParseFromArray(message.data, static_cast<int>(message.dataSize))) {
 		return std::nullopt;
 	}
