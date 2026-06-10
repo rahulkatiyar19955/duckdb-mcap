@@ -37,7 +37,9 @@ struct McapScanBindData : public TableFunctionData {
 
 	//! Expanded file list (glob patterns resolved at bind time).
 	vector<string> paths;
-	//! Sum of per-file statistics message counts; unset when any file lacks them.
+	//! First file's statistics message count scaled by the file count — an
+	//! estimate, not a total: binding deliberately opens only one file (globs can
+	//! match many, possibly remote files). Unset when the first file lacks stats.
 	std::optional<idx_t> estimated_rows;
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -137,17 +139,18 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 	}
 	std::sort(paths.begin(), paths.end());
 
-	// Validate every file up front and collect statistics for the optimizer's
-	// cardinality estimate (summary reads are a few small random reads per file).
-	idx_t total_rows = 0;
-	bool have_statistics = true;
-	for (auto &path : paths) {
-		auto file = OpenMcapFile(context, path);
+	// The scan's schema is fixed, so binding does not need file contents. Open
+	// only the first file: that validates the glob matched real MCAP and seeds
+	// the optimizer's cardinality estimate, without paying one summary read per
+	// matched file (expensive for wide globs and remote filesystems).
+	idx_t first_file_rows = 0;
+	bool have_statistics = false;
+	{
+		auto file = OpenMcapFile(context, paths[0]);
 		auto &stats = file->reader.statistics();
 		if (stats.has_value()) {
-			total_rows += stats->messageCount;
-		} else {
-			have_statistics = false;
+			first_file_rows = stats->messageCount;
+			have_statistics = true;
 		}
 	}
 
@@ -172,9 +175,11 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 
 	auto result = make_uniq<McapScanBindData>(std::move(paths));
 	if (have_statistics) {
-		result->estimated_rows = total_rows;
+		result->estimated_rows = first_file_rows * result->paths.size();
 	}
-	return result;
+	// NB: explicit move — GCC does not implicitly convert unique_ptr<Derived>
+	// lvalues to unique_ptr<Base> on return.
+	return std::move(result);
 }
 
 //! Split one file's pushdown window into partitions whose boundaries fall on
