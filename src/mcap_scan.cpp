@@ -9,6 +9,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 #include "mcap_file.hpp"
 #include "mcap_time.hpp"
 #include "protobuf_decoder.hpp"
@@ -36,6 +37,8 @@ struct McapScanBindData : public TableFunctionData {
 
 	//! Expanded file list (glob patterns resolved at bind time).
 	vector<string> paths;
+	//! Sum of per-file statistics message counts; unset when any file lacks them.
+	std::optional<idx_t> estimated_rows;
 
 	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<McapScanBindData>(paths);
@@ -134,6 +137,20 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 	}
 	std::sort(paths.begin(), paths.end());
 
+	// Validate every file up front and collect statistics for the optimizer's
+	// cardinality estimate (summary reads are a few small random reads per file).
+	idx_t total_rows = 0;
+	bool have_statistics = true;
+	for (auto &path : paths) {
+		auto file = OpenMcapFile(context, path);
+		auto &stats = file->reader.statistics();
+		if (stats.has_value()) {
+			total_rows += stats->messageCount;
+		} else {
+			have_statistics = false;
+		}
+	}
+
 	names.emplace_back("timestamp");
 	return_types.emplace_back(LogicalTypeId::TIMESTAMP_NS);
 	names.emplace_back("topic");
@@ -153,7 +170,11 @@ static unique_ptr<FunctionData> McapScanBind(ClientContext &context, TableFuncti
 	names.emplace_back("filename");
 	return_types.emplace_back(LogicalTypeId::VARCHAR);
 
-	return make_uniq<McapScanBindData>(std::move(paths));
+	auto result = make_uniq<McapScanBindData>(std::move(paths));
+	if (have_statistics) {
+		result->estimated_rows = total_rows;
+	}
+	return result;
 }
 
 //! Split one file's pushdown window into partitions whose boundaries fall on
@@ -333,6 +354,22 @@ static void McapScanFunction(ClientContext &context, TableFunctionInput &data, D
 	output.SetCardinality(count);
 }
 
+static unique_ptr<NodeStatistics> McapScanCardinality(ClientContext &, const FunctionData *bind_data) {
+	auto &bind = bind_data->Cast<McapScanBindData>();
+	if (!bind.estimated_rows.has_value()) {
+		return nullptr;
+	}
+	return make_uniq<NodeStatistics>(*bind.estimated_rows, *bind.estimated_rows);
+}
+
+static double McapScanProgress(ClientContext &, const FunctionData *, const GlobalTableFunctionState *gstate_p) {
+	auto &gstate = gstate_p->Cast<McapScanGlobalState>();
+	if (gstate.partitions.empty()) {
+		return 100.0;
+	}
+	return 100.0 * double(gstate.finished_partitions.load()) / double(gstate.partitions.size());
+}
+
 } // namespace
 
 TableFunction GetMcapScanFunction() {
@@ -345,6 +382,8 @@ TableFunction GetMcapScanFunction() {
 	// the executor re-check predicates for correctness.
 	function.filter_prune = false;
 	function.supports_pushdown_type = McapSupportsPushdown;
+	function.cardinality = McapScanCardinality;
+	function.table_scan_progress = McapScanProgress;
 	return function;
 }
 
