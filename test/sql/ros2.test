@@ -17,11 +17,11 @@ SELECT DISTINCT schema_name FROM mcap_scan('test/mcap/ros2.mcap');
 ----
 test_msgs/msg/Sample
 
-# All cdr rows decode to valid JSON.
+# LE, BE and the two poison channels: only well-formed XCDR1 rows decode.
 query II
 SELECT count(*), sum(json_valid(payload_json)::INT) FROM mcap_scan('test/mcap/ros2.mcap');
 ----
-2	2
+5	3
 
 # Nested struct fields (header.stamp.sec, header.frame_id), fixed float64[3] array,
 # and trailing string all decode correctly.
@@ -31,7 +31,29 @@ SELECT payload_json->>'$.header.frame_id',
        payload_json->'$.values',
        payload_json->>'$.label'
 FROM mcap_scan('test/mcap/ros2.mcap')
+WHERE topic = '/sample'
 ORDER BY timestamp;
 ----
 base_link	100	[1.5,2.5,3.5]	alpha
 odom	101	[-1,0,9.81]	beta
+
+# Big-endian XCDR1 decodes identically to little-endian.
+query TTTT
+SELECT payload_json->>'$.header.frame_id',
+       payload_json->>'$.header.stamp.nanosec',
+       payload_json->'$.values',
+       payload_json->>'$.label'
+FROM mcap_scan('test/mcap/ros2.mcap')
+WHERE topic = '/sample_be';
+----
+map	7	[4,5,6]	gamma
+
+# Truncated payloads and XCDR2 encapsulations yield NULL, never garbage.
+query TT
+SELECT topic, payload_json IS NULL
+FROM mcap_scan('test/mcap/ros2.mcap')
+WHERE topic IN ('/bad', '/xcdr2')
+ORDER BY topic;
+----
+/bad	true
+/xcdr2	true

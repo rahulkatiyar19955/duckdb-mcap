@@ -69,8 +69,23 @@ class CdrWriter:
         self.buf.extend(data)
 
 
-def encode_sample(sec, nanosec, frame_id, values, label):
-    w = CdrWriter()
+class CdrWriterBE(CdrWriter):
+    """Big-endian CDR body writer (XCDR1 BE, encapsulation id 0x0000)."""
+
+    def i32(self, v):
+        self._align(4)
+        self.buf.extend(struct.pack(">i", v))
+
+    def u32(self, v):
+        self._align(4)
+        self.buf.extend(struct.pack(">I", v))
+
+    def f64(self, v):
+        self._align(8)
+        self.buf.extend(struct.pack(">d", v))
+
+
+def encode_sample_body(w, sec, nanosec, frame_id, values, label):
     # header.stamp.sec, header.stamp.nanosec
     w.i32(sec)
     w.u32(nanosec)
@@ -81,8 +96,19 @@ def encode_sample(sec, nanosec, frame_id, values, label):
         w.f64(v)
     # label
     w.string(label)
+    return bytes(w.buf)
+
+
+def encode_sample(sec, nanosec, frame_id, values, label):
     # 4-byte CDR encapsulation header: rep id (0x0001 = CDR LE) + options(2)
-    return b"\x00\x01\x00\x00" + bytes(w.buf)
+    body = encode_sample_body(CdrWriter(), sec, nanosec, frame_id, values, label)
+    return b"\x00\x01\x00\x00" + body
+
+
+def encode_sample_be(sec, nanosec, frame_id, values, label):
+    # rep id 0x0000 = XCDR1 big-endian
+    body = encode_sample_body(CdrWriterBE(), sec, nanosec, frame_id, values, label)
+    return b"\x00\x00\x00\x00" + body
 
 
 def main() -> None:
@@ -111,6 +137,43 @@ def main() -> None:
             log_time=1_700_000_001_000_000_000,
             publish_time=1_700_000_001_000_000_000,
             data=encode_sample(101, 0, "odom", [-1.0, 0.0, 9.81], "beta"),
+        )
+        # Big-endian XCDR1 payload: must decode identically to LE.
+        chan_be = writer.register_channel(
+            topic="/sample_be",
+            message_encoding="cdr",
+            schema_id=schema_id,
+        )
+        writer.add_message(
+            channel_id=chan_be,
+            log_time=1_700_000_002_000_000_000,
+            publish_time=1_700_000_002_000_000_000,
+            data=encode_sample_be(102, 7, "map", [4.0, 5.0, 6.0], "gamma"),
+        )
+        # Truncated payload: decoder must yield NULL, not garbage or a crash.
+        chan_bad = writer.register_channel(
+            topic="/bad",
+            message_encoding="cdr",
+            schema_id=schema_id,
+        )
+        writer.add_message(
+            channel_id=chan_bad,
+            log_time=1_700_000_003_000_000_000,
+            publish_time=1_700_000_003_000_000_000,
+            data=encode_sample(103, 0, "base_link", [1.0, 2.0, 3.0], "delta")[:10],
+        )
+        # XCDR2 encapsulation (rep id 0x0007): unsupported, must yield NULL rather
+        # than silently misparsing under XCDR1 alignment rules.
+        chan_x2 = writer.register_channel(
+            topic="/xcdr2",
+            message_encoding="cdr",
+            schema_id=schema_id,
+        )
+        writer.add_message(
+            channel_id=chan_x2,
+            log_time=1_700_000_004_000_000_000,
+            publish_time=1_700_000_004_000_000_000,
+            data=b"\x00\x07\x00\x00" + encode_sample(104, 0, "odom", [1.0, 2.0, 3.0], "epsilon")[4:],
         )
         writer.finish()
 
