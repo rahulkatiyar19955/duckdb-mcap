@@ -20,12 +20,12 @@ SELECT topic FROM mcap_scan('test/mcap/sample.mcap') ORDER BY timestamp LIMIT 1;
 query I
 SELECT count(*) FROM mcap_scan('test/mcap/*.mcap');
 ----
-12
+14
 
 query I
 SELECT count(DISTINCT filename) FROM mcap_scan('test/mcap/*.mcap');
 ----
-3
+4
 
 # Replacement scan: FROM 'x.mcap' works directly.
 query I
@@ -40,9 +40,24 @@ PRAGMA threads=4;
 query I
 SELECT count(*) FROM mcap_scan('test/mcap/*.mcap');
 ----
-12
+14
 
 query II
 SELECT count(*), count(DISTINCT topic) FROM mcap_scan('test/mcap/ros2.mcap');
 ----
 7	5
+
+# LZ4-compressed chunks decode identically to the zstd default.
+query I
+SELECT count(*) FROM mcap_scan('test/mcap/sample_lz4.mcap');
+----
+2
+
+query I
+SELECT count(*) FROM (
+    SELECT topic, payload_json FROM mcap_scan('test/mcap/sample.mcap')
+    INTERSECT
+    SELECT topic, payload_json FROM mcap_scan('test/mcap/sample_lz4.mcap')
+);
+----
+2

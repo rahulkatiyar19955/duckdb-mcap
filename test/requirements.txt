@@ -1,0 +1,6 @@
+# Pinned fixture-generator dependencies. CI regenerates the committed MCAP
+# fixtures with exactly these versions and fails on drift (`git diff` check),
+# so version bumps here must be accompanied by regenerated fixtures.
+mcap==1.3.1
+protobuf==7.35.0
+lz4==4.4.5
