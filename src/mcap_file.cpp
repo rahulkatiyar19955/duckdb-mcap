@@ -7,6 +7,14 @@
 
 namespace duckdb {
 
+DuckDBFileReadable::DuckDBFileReadable(FileSystem &fs, const std::string &path)
+    // Build the flags from the integral constant: referencing the class-typed
+    // FileFlags::FILE_FLAGS_READ constant from an extension TU trips a GCC
+    // multiple-definition link error against DuckDB's out-of-line definition.
+    : handle(fs.OpenFile(path, FileOpenFlags(FileOpenFlags::FILE_FLAGS_READ))),
+      file_size(static_cast<uint64_t>(handle->GetFileSize())) {
+}
+
 uint64_t DuckDBFileReadable::read(std::byte **output, uint64_t offset, uint64_t size) {
 	if (offset >= file_size) {
 		return 0;

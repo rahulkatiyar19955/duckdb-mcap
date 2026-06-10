@@ -15,10 +15,7 @@ class ClientContext;
 //! internal buffer is reused across read() calls — one instance per reader.
 class DuckDBFileReadable final : public mcap::IReadable {
 public:
-	DuckDBFileReadable(FileSystem &fs, const std::string &path)
-	    : handle(fs.OpenFile(path, FileFlags::FILE_FLAGS_READ)),
-	      file_size(static_cast<uint64_t>(handle->GetFileSize())) {
-	}
+	DuckDBFileReadable(FileSystem &fs, const std::string &path);
 
 	uint64_t size() const override {
 		return file_size;
