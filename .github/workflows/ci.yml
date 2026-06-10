@@ -24,6 +24,8 @@ jobs:
         include:
           - platform: linux_amd64
             runner: ubuntu-22.04
+          - platform: linux_arm64
+            runner: ubuntu-22.04-arm
           - platform: osx_arm64
             runner: macos-14
     steps:
