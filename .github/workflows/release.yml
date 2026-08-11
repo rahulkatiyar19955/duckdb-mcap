@@ -119,14 +119,28 @@ jobs:
         run: make release
 
       # MSVC needs its environment set up in-process, so this runs through cmd
-      # rather than bash. Git ships a link.exe that shadows MSVC's linker on PATH.
+      # rather than bash. The VS edition and install path vary by runner image,
+      # so locate it with vswhere rather than hardcoding a path.
+      #
+      # Every step here fails loudly on purpose. cmd does not abort on a failed
+      # `call`, and the runner also ships MinGW g++ on PATH, so a missing vcvars
+      # otherwise degrades into a silent GNU build that only surfaces much later
+      # as an unrecognized MSVC linker flag -- and could never have linked the
+      # MSVC-ABI libraries vcpkg installs for this triplet anyway.
       - name: Build extension (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         env:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set "VSWHERE=C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          if not exist "%VSWHERE%" ( echo ::error::vswhere.exe not found & exit /b 1 )
+          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+          if not defined VSPATH ( echo ::error::No Visual Studio install with the C++ toolset & exit /b 1 )
+          echo Using Visual Studio at %VSPATH%
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          where cl >nul 2>&1 || ( echo ::error::cl.exe missing from PATH after vcvars64 & exit /b 1 )
+          REM Git ships a link.exe that otherwise shadows MSVC's linker on PATH.
           if exist "C:\Program Files\Git\usr\bin\link.exe" move "C:\Program Files\Git\usr\bin\link.exe" "C:\Program Files\Git\usr\bin\link-git.exe"
           make release
 
@@ -145,14 +159,36 @@ jobs:
           file "$ext" || true
 
       # --- Smoke test: load it and run a trivial query ----------------------
+      # Uses setup-python rather than the runner's system python3: on macOS the
+      # latter is Homebrew-managed and refuses `pip install` under PEP 668, and
+      # on Windows setup-python exposes `python` but no `python3`.
+      - name: Set up Python
+        if: ${{ !matrix.cross }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # A loadable extension is pinned to the exact DuckDB version it was built
+      # against, so the client must match the submodule rather than float to
+      # the newest 1.4.x (which is how this broke: built 1.4.4, pip gave 1.4.5).
+      - name: Resolve pinned DuckDB version
+        if: ${{ !matrix.cross }}
+        id: duckdb_version
+        shell: bash
+        run: |
+          ver=$(git -C duckdb describe --tags --abbrev=0)
+          ver=${ver#v}
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Pinned DuckDB: $ver"
+
       # Skipped for osx_amd64: the x86_64 binary cannot be loaded by the arm64
       # Python on the runner that cross-compiled it.
       - name: Smoke test (load extension)
         if: ${{ !matrix.cross }}
         shell: bash
         run: |
-          python3 -m pip install --quiet "duckdb>=1.4,<1.5"
-          python3 - "${{ steps.locate.outputs.path }}" <<'PY'
+          python -m pip install --quiet "duckdb==${{ steps.duckdb_version.outputs.version }}"
+          python - "${{ steps.locate.outputs.path }}" <<'PY'
           import sys, duckdb
           ext = sys.argv[1]
           con = duckdb.connect(":memory:", config={"allow_unsigned_extensions": "true"})
