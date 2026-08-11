@@ -1,0 +1,8 @@
+# MCAP test fixtures are binary. Without this, a Windows runner's CRLF conversion
+# would rewrite bytes on checkout and make CI's fixture-drift check
+# (`git diff --exit-code -- test/mcap`) fail spuriously.
+test/mcap/** binary
+*.mcap binary
+
+# Keep shell scripts LF so they stay runnable under Git Bash on Windows runners.
+*.sh text eol=lf
