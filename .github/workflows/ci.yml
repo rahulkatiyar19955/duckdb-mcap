@@ -49,10 +49,22 @@ jobs:
             vcpkg_target_triplet: x64-osx-release
             vcpkg_host_triplet: arm64-osx-release
             cross: true
+          # Non-blocking: builds, but is not expected to pass yet. windows-latest
+          # now ships Visual Studio 18, whose STL dropped stdext::checked_array_iterator.
+          # DuckDB v1.4.4's vendored fmt still uses it, so duckdb_fmt fails to compile
+          # before our own sources are ever reached:
+          #   third_party/fmt/include/fmt/format.h(326):
+          #     error C2653: 'stdext': is not a class or namespace name
+          # Nothing in this repo can fix that. It clears when the duckdb submodule
+          # moves to a release that supports the VS18 toolset (or if pinning an
+          # older toolset via vcvars64 -vcvars_ver becomes possible on the image).
+          # Drop continue-on-error once it builds.
           - platform: windows_amd64
             runner: windows-latest
             vcpkg_target_triplet: x64-windows-static-md-release-vs2019comp
             vcpkg_host_triplet: x64-windows-static-md-release-vs2019comp
+            experimental: true
+    continue-on-error: ${{ matrix.experimental || false }}
     env:
       DUCKDB_PLATFORM: ${{ matrix.platform }}
       OSX_BUILD_ARCH: ${{ matrix.osx_build_arch }}
