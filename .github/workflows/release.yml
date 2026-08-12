@@ -34,18 +34,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Every entry sets a vcpkg triplet, and that is load-bearing: the
+          # "Setup vcpkg" step and VCPKG_TOOLCHAIN_PATH are both gated on
+          # `vcpkg_target_triplet != ''`. An entry without one silently falls
+          # back to the runner's apt/brew libraries and links against them
+          # dynamically, producing an artifact that only loads on a machine
+          # carrying those exact library versions — which is how v0.1.2 shipped
+          # three unusable binaries. Every *-release triplet sets
+          # VCPKG_LIBRARY_LINKAGE static, which is what makes the published
+          # extension self-contained.
           - platform: linux_amd64
             runner: ubuntu-22.04
             arch: amd64
+            vcpkg_target_triplet: x64-linux-release
+            vcpkg_host_triplet: x64-linux-release
           - platform: linux_arm64
             runner: ubuntu-22.04-arm
             arch: arm64
+            vcpkg_target_triplet: arm64-linux-release
+            vcpkg_host_triplet: arm64-linux-release
           - platform: osx_arm64
             runner: macos-14 # Apple Silicon runner
             arch: arm64
+            vcpkg_target_triplet: arm64-osx-release
+            vcpkg_host_triplet: arm64-osx-release
           # Cross-compiled x86_64 on an Apple Silicon runner: GitHub has retired
-          # Intel macOS runners, and this is the path DuckDB itself uses. Deps
-          # come from vcpkg because Homebrew here is arm64-only.
+          # Intel macOS runners, and this is the path DuckDB itself uses.
           - platform: osx_amd64
             runner: macos-14
             arch: amd64
@@ -92,23 +106,21 @@ jobs:
           fetch-depth: 0
 
       # --- Dependencies -----------------------------------------------------
+      # Build tooling only. lz4, zstd and protobuf deliberately come from vcpkg
+      # instead: installing the apt/brew copies as well would put dynamic
+      # libraries on the default search path, where find_library could pick one
+      # up ahead of vcpkg's static build and quietly reintroduce the runtime
+      # dependency this workflow exists to avoid.
       - name: Install build deps (Linux)
         if: startsWith(matrix.platform, 'linux')
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            build-essential cmake ninja-build pkg-config \
-            liblz4-dev libzstd-dev libprotobuf-dev protobuf-compiler
+            build-essential cmake ninja-build pkg-config
 
-      # osx_arm64 only; osx_amd64 sources its x86_64 deps from vcpkg instead.
       - name: Install build deps (macOS)
-        if: matrix.platform == 'osx_arm64'
-        run: |
-          brew install cmake ninja lz4 zstd protobuf
-
-      - name: Install Ninja (macOS cross)
-        if: matrix.platform == 'osx_amd64'
-        run: brew install ninja
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
 
       - name: Install Ninja (Windows)
         if: runner.os == 'Windows'
@@ -168,6 +180,42 @@ jobs:
           echo "path=$ext" >> "$GITHUB_OUTPUT"
           echo "Built: $ext"
           file "$ext" || true
+
+      # --- Portability gate -------------------------------------------------
+      # The smoke test below cannot catch a dynamic-linkage mistake: it loads
+      # the extension ON the build machine, where the apt/brew libraries are
+      # installed, so it passes for an artifact that will load nowhere else.
+      # That is exactly how v0.1.2 shipped three binaries that failed at dlopen
+      # on every other machine. This step reads the binary's own dependency
+      # table, so it fails on the runner that produced it rather than in a
+      # user's hands.
+      - name: Assert the extension is self-contained
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ext="${{ steps.locate.outputs.path }}"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Everything outside /usr/lib and /System/Library ships with the OS;
+            # a Homebrew path here means the dependency was not linked in.
+            bad=$(otool -L "$ext" | tail -n +2 | awk '{print $1}' \
+                  | grep -vE '^(/usr/lib/|/System/Library/|@rpath/mcap\.duckdb_extension)' || true)
+          else
+            # Only the C/C++ runtime may be dynamic; protobuf, abseil, lz4 and
+            # zstd must all be baked in.
+            bad=$(readelf -d "$ext" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/' \
+                  | grep -vE '^(libc\.so|libm\.so|libdl\.so|librt\.so|libpthread\.so|libstdc\+\+\.so|libgcc_s\.so|ld-linux)' || true)
+          fi
+
+          if [ -n "$bad" ]; then
+            echo "::error::${{ matrix.platform }} extension is NOT self-contained; it would fail to load on any machine without these:"
+            echo "$bad"
+            echo
+            echo "Cause: this matrix entry built without the vcpkg toolchain, so lz4/zstd/protobuf"
+            echo "linked dynamically against the runner's own libraries. Give the entry a"
+            echo "vcpkg_target_triplet (the *-release triplets link statically)."
+            exit 1
+          fi
+          echo "OK: ${{ matrix.platform }} has no non-system dynamic dependencies."
 
       # --- Smoke test: load it and run a trivial query ----------------------
       # Uses setup-python rather than the runner's system python3: on macOS the
