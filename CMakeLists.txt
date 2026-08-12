@@ -49,28 +49,15 @@ find_path(
     NAMES zstd.h
     HINTS ${PC_ZSTD_INCLUDEDIR} ${PC_ZSTD_INCLUDE_DIRS})
 
-# Library: on ELF/Mach-O only lz4 needs linking; zstd symbols stay undefined in the
-# loadable extension and are bound against DuckDB's bundled copy at dlopen time
-# (linking Homebrew's zstd too would risk duplicate-symbol errors).
+# Library: only lz4 needs linking. zstd symbols stay undefined in the loadable
+# extension and are bound against DuckDB's bundled copy at dlopen time, so
+# linking a second zstd here would risk duplicate-symbol errors. (This holds for
+# ELF and Mach-O; a PE build would have to link zstd explicitly, but Windows is
+# not a supported target — see the note at the top of .github/workflows/ci.yml.)
 find_library(
     LZ4_LIBRARY
     NAMES lz4 liblz4 lz4_static
     HINTS ${PC_LZ4_LIBDIR} ${PC_LZ4_LIBRARY_DIRS})
-
-# Windows has no such luxury: a PE DLL must resolve every symbol at link time against
-# an import library, and duckdb.dll does not re-export zstd's C API. MCAP's reader.inl
-# is header-inlined into our objects and calls ZSTD_*, so those references land in this
-# binary and zstd has to be linked explicitly here.
-if(WIN32)
-    find_library(
-        ZSTD_LIBRARY
-        NAMES zstd zstd_static libzstd
-        HINTS ${PC_ZSTD_LIBDIR} ${PC_ZSTD_LIBRARY_DIRS})
-    if(NOT ZSTD_LIBRARY)
-        message(FATAL_ERROR "zstd library not found; required to link the extension on Windows.")
-    endif()
-    message(STATUS "MCAP extension using zstd: ${ZSTD_LIBRARY}")
-endif()
 
 if(NOT LZ4_INCLUDE_DIR OR NOT LZ4_LIBRARY)
     message(FATAL_ERROR "lz4 not found. Install it (e.g. 'brew install lz4') and re-run.")
@@ -129,18 +116,9 @@ build_loadable_extension(${TARGET_NAME} "" ${EXTENSION_SOURCES})
 
 foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
     target_compile_features(${target} PRIVATE cxx_std_17)
-    # ZSTD_LIBRARY is only set on Windows (see above); it expands to nothing elsewhere,
-    # preserving the dlopen-time binding against DuckDB's bundled zstd.
-    target_link_libraries(${target} ${LZ4_LIBRARY} ${ZSTD_LIBRARY} protobuf::libprotobuf)
-    if(WIN32)
-        # MCAP pulls in <windows.h> on Windows, whose min/max macros would otherwise
-        # break the many std::min/std::max calls across src/.
-        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-        # Dynamic protobuf descriptor code generates large object files under MSVC.
-        if(MSVC)
-            target_compile_options(${target} PRIVATE /bigobj)
-        endif()
-    endif()
+    # zstd is deliberately absent: its symbols bind against DuckDB's bundled copy
+    # at dlopen time.
+    target_link_libraries(${target} ${LZ4_LIBRARY} protobuf::libprotobuf)
 endforeach()
 
 install(

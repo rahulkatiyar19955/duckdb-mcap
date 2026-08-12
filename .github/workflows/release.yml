@@ -6,8 +6,11 @@ name: Build & Release mcap extension
 #
 # Platform matrix (the names match DataPilot's _extension_path() keys):
 #   linux_amd64   linux_arm64   osx_arm64   osx_amd64
-#   windows_amd64 -- builds, but does not currently pass; see the matrix entry
-#                    below. It is non-blocking and produces no release asset.
+#
+# Windows is deliberately unsupported. DuckDB v1.4.4's vendored fmt uses
+# stdext::checked_array_iterator, which the Visual Studio 18 STL on
+# windows-latest removed, so duckdb_fmt cannot compile before this repo's own
+# sources are even reached — nothing here can fix it.
 #
 # Trigger:
 #   - push a tag like `v0.1.0`  -> builds all platforms + creates/updates that Release
@@ -67,38 +70,14 @@ jobs:
             vcpkg_target_triplet: x64-osx-release
             vcpkg_host_triplet: arm64-osx-release
             cross: true
-          # Non-blocking, and consequently NOT published: windows-latest now ships
-          # Visual Studio 18, whose STL dropped stdext::checked_array_iterator, which
-          # DuckDB v1.4.4's vendored fmt still uses. duckdb_fmt fails to compile before
-          # our own sources are reached, so no Windows asset is produced and releases
-          # carry the other four platforms. Nothing in this repo can fix that; it clears
-          # when the duckdb submodule moves to a VS18-capable release. Drop
-          # continue-on-error once it builds.
-          - platform: windows_amd64
-            runner: windows-latest
-            arch: amd64
-            vcpkg_target_triplet: x64-windows-static-md-release-vs2019comp
-            vcpkg_host_triplet: x64-windows-static-md-release-vs2019comp
-            experimental: true
-    continue-on-error: ${{ matrix.experimental || false }}
     env:
       DUCKDB_PLATFORM: ${{ matrix.platform }}
       OSX_BUILD_ARCH: ${{ matrix.osx_build_arch }}
       GEN: ninja
       VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_target_triplet }}
       VCPKG_HOST_TRIPLET: ${{ matrix.vcpkg_host_triplet }}
-      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/extension-ci-tools/toolchains
       VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension-ci-tools/vcpkg_ports
     steps:
-      # Must precede checkout so CRLF conversion never touches the binary
-      # .mcap fixtures or the shell scripts.
-      - name: Keep LF line endings
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
@@ -122,12 +101,12 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja
 
-      - name: Install Ninja (Windows)
-        if: runner.os == 'Windows'
-        run: choco install ninja -y
-
+      # Unconditional on purpose. This used to be gated on
+      # `matrix.vcpkg_target_triplet != ''`, so a row that forgot a triplet
+      # skipped vcpkg in silence and linked against the runner's own libraries
+      # — that is what shipped three unloadable binaries in v0.1.2. With no
+      # gate, a missing triplet is a loud build failure instead.
       - name: Setup vcpkg
-        if: matrix.vcpkg_target_triplet != ''
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
@@ -136,36 +115,9 @@ jobs:
       # The standard extension-ci-tools Makefile builds the loadable extension
       # against the pinned DuckDB submodule (v1.4.4). GEN=ninja speeds it up.
       - name: Build extension
-        if: runner.os != 'Windows'
-        env:
-          VCPKG_TOOLCHAIN_PATH: ${{ matrix.vcpkg_target_triplet != '' && format('{0}/vcpkg/scripts/buildsystems/vcpkg.cmake', github.workspace) || '' }}
-        run: make release
-
-      # MSVC needs its environment set up in-process, so this runs through cmd
-      # rather than bash. The VS edition and install path vary by runner image,
-      # so locate it with vswhere rather than hardcoding a path.
-      #
-      # Every step here fails loudly on purpose. cmd does not abort on a failed
-      # `call`, and the runner also ships MinGW g++ on PATH, so a missing vcvars
-      # otherwise degrades into a silent GNU build that only surfaces much later
-      # as an unrecognized MSVC linker flag -- and could never have linked the
-      # MSVC-ABI libraries vcpkg installs for this triplet anyway.
-      - name: Build extension (Windows)
-        if: runner.os == 'Windows'
-        shell: cmd
         env:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-        run: |
-          set "VSWHERE=C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-          if not exist "%VSWHERE%" ( echo ::error::vswhere.exe not found & exit /b 1 )
-          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-          if not defined VSPATH ( echo ::error::No Visual Studio install with the C++ toolset & exit /b 1 )
-          echo Using Visual Studio at %VSPATH%
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          where cl >nul 2>&1 || ( echo ::error::cl.exe missing from PATH after vcvars64 & exit /b 1 )
-          REM Git ships a link.exe that otherwise shadows MSVC's linker on PATH.
-          if exist "C:\Program Files\Git\usr\bin\link.exe" move "C:\Program Files\Git\usr\bin\link.exe" "C:\Program Files\Git\usr\bin\link-git.exe"
-          make release
+        run: make release
 
       - name: Locate built extension
         id: locate
@@ -190,7 +142,6 @@ jobs:
       # table, so it fails on the runner that produced it rather than in a
       # user's hands.
       - name: Assert the extension is self-contained
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           ext="${{ steps.locate.outputs.path }}"
@@ -218,9 +169,8 @@ jobs:
           echo "OK: ${{ matrix.platform }} has no non-system dynamic dependencies."
 
       # --- Smoke test: load it and run a trivial query ----------------------
-      # Uses setup-python rather than the runner's system python3: on macOS the
-      # latter is Homebrew-managed and refuses `pip install` under PEP 668, and
-      # on Windows setup-python exposes `python` but no `python3`.
+      # Uses setup-python rather than the runner's system python3, which on
+      # macOS is Homebrew-managed and refuses `pip install` under PEP 668.
       - name: Set up Python
         if: ${{ !matrix.cross }}
         uses: actions/setup-python@v5
