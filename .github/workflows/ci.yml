@@ -4,11 +4,11 @@ name: CI
 # pinned DuckDB (v1.4.4) and runs the sqllogictest suite via `make test`.
 # Release/packaging lives in release.yml and is intentionally separate.
 #
-# Dependency sourcing differs by platform:
-#   linux_*, osx_arm64  -> apt / brew (native, fast)
-#   osx_amd64           -> vcpkg, because Homebrew on an arm64 runner cannot
-#                          supply x86_64 builds of lz4/zstd/protobuf
-#   windows_amd64       -> vcpkg, the only practical source on Windows
+# lz4, zstd and protobuf come from vcpkg on every platform, matching release.yml
+# exactly. They used to come from apt/brew on linux_* and osx_arm64, which linked
+# them dynamically; that is what shipped three unloadable binaries in v0.1.2. The
+# two workflows must agree, or a PR passes against a dependency configuration the
+# release never uses and the difference only surfaces after a tag is pushed.
 # The vcpkg commit and triplets match DuckDB's own distribution matrix
 # (extension-ci-tools/config/distribution_matrix.json).
 
@@ -34,12 +34,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Every entry needs a vcpkg triplet: "Setup vcpkg" and
+          # VCPKG_TOOLCHAIN_PATH are gated on it, and an entry without one falls
+          # back to the runner's apt/brew libraries and links them dynamically.
           - platform: linux_amd64
             runner: ubuntu-22.04
+            vcpkg_target_triplet: x64-linux-release
+            vcpkg_host_triplet: x64-linux-release
           - platform: linux_arm64
             runner: ubuntu-22.04-arm
+            vcpkg_target_triplet: arm64-linux-release
+            vcpkg_host_triplet: arm64-linux-release
           - platform: osx_arm64
             runner: macos-14
+            vcpkg_target_triplet: arm64-osx-release
+            vcpkg_host_triplet: arm64-osx-release
           # Cross-compiled x86_64 on an Apple Silicon runner. GitHub has retired
           # Intel macOS runners, and this is the path DuckDB itself uses. The
           # resulting binary cannot execute here, so this row is build-only.
@@ -49,70 +58,39 @@ jobs:
             vcpkg_target_triplet: x64-osx-release
             vcpkg_host_triplet: arm64-osx-release
             cross: true
-          # Non-blocking: builds, but is not expected to pass yet. windows-latest
-          # now ships Visual Studio 18, whose STL dropped stdext::checked_array_iterator.
-          # DuckDB v1.4.4's vendored fmt still uses it, so duckdb_fmt fails to compile
-          # before our own sources are ever reached:
-          #   third_party/fmt/include/fmt/format.h(326):
-          #     error C2653: 'stdext': is not a class or namespace name
-          # Nothing in this repo can fix that. It clears when the duckdb submodule
-          # moves to a release that supports the VS18 toolset (or if pinning an
-          # older toolset via vcvars64 -vcvars_ver becomes possible on the image).
-          # Drop continue-on-error once it builds.
-          - platform: windows_amd64
-            runner: windows-latest
-            vcpkg_target_triplet: x64-windows-static-md-release-vs2019comp
-            vcpkg_host_triplet: x64-windows-static-md-release-vs2019comp
-            experimental: true
-    continue-on-error: ${{ matrix.experimental || false }}
     env:
       DUCKDB_PLATFORM: ${{ matrix.platform }}
       OSX_BUILD_ARCH: ${{ matrix.osx_build_arch }}
       GEN: ninja
       VCPKG_TARGET_TRIPLET: ${{ matrix.vcpkg_target_triplet }}
       VCPKG_HOST_TRIPLET: ${{ matrix.vcpkg_host_triplet }}
-      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/extension-ci-tools/toolchains
       VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension-ci-tools/vcpkg_ports
     steps:
-      # Must precede checkout: the committed .mcap fixtures are binary and CRLF
-      # rewriting would break both the build inputs and the drift check below.
-      - name: Keep LF line endings
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
+      # Build tooling only — lz4/zstd/protobuf come from vcpkg. Installing the
+      # apt/brew copies too would place dynamic libraries on the default search
+      # path, where find_library could pick one up ahead of vcpkg's static build.
       - name: Install build deps (Linux)
         if: startsWith(matrix.platform, 'linux')
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            build-essential cmake ninja-build pkg-config \
-            liblz4-dev libzstd-dev libprotobuf-dev protobuf-compiler
+            build-essential cmake ninja-build pkg-config
 
-      # osx_arm64 only. osx_amd64 deliberately gets its deps from vcpkg instead;
-      # Homebrew here would hand back arm64 libraries and fail the cross link.
       - name: Install build deps (macOS)
-        if: matrix.platform == 'osx_arm64'
-        run: brew install cmake ninja lz4 zstd protobuf
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
 
-      - name: Install Ninja (macOS cross)
-        if: matrix.platform == 'osx_amd64'
-        run: brew install ninja
-
-      - name: Install Ninja (Windows)
-        if: runner.os == 'Windows'
-        run: choco install ninja -y
-
+      # Unconditional on purpose. This used to be gated on
+      # `matrix.vcpkg_target_triplet != ''`, so a row that forgot a triplet
+      # skipped vcpkg in silence and linked against the runner's own libraries.
+      # With no gate, a missing triplet is a loud build failure instead.
       - name: Setup vcpkg
-        if: matrix.vcpkg_target_triplet != ''
         uses: lukka/run-vcpkg@v11.1
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
@@ -124,13 +102,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Only on the platforms that already did this. The check verifies repo
-      # integrity (committed bytes == generator output), not anything
-      # platform-specific, so the two new rows skip it: osx_amd64 is build-only,
-      # and adding a byte-exactness check to the Windows row would only invite
-      # flakiness on the riskiest job.
+      # The check verifies repo integrity (committed bytes == generator output),
+      # not anything platform-specific, so running it once per native row is
+      # enough; osx_amd64 skips it because that row is build-only.
       - name: Regenerate MCAP test fixtures
-        if: matrix.platform == 'linux_amd64' || matrix.platform == 'linux_arm64' || matrix.platform == 'osx_arm64'
+        if: ${{ !matrix.cross }}
         run: |
           python -m pip install --quiet -r test/requirements.txt
           python test/generate_sample_mcap.py
@@ -140,40 +116,45 @@ jobs:
       # Committed fixtures must match what the pinned generators produce, so a
       # generator (or dependency) change can never silently diverge from them.
       - name: Check fixture drift
-        if: matrix.platform == 'linux_amd64' || matrix.platform == 'linux_arm64' || matrix.platform == 'osx_arm64'
+        if: ${{ !matrix.cross }}
         run: git diff --exit-code -- test/mcap
 
       - name: Build extension
-        if: runner.os != 'Windows'
-        env:
-          VCPKG_TOOLCHAIN_PATH: ${{ matrix.vcpkg_target_triplet != '' && format('{0}/vcpkg/scripts/buildsystems/vcpkg.cmake', github.workspace) || '' }}
-        run: make release
-
-      # MSVC needs its environment set up in-process, so this runs through cmd
-      # rather than bash. The VS edition and install path vary by runner image,
-      # so locate it with vswhere rather than hardcoding a path.
-      #
-      # Every step here fails loudly on purpose. cmd does not abort on a failed
-      # `call`, and the runner also ships MinGW g++ on PATH, so a missing vcvars
-      # otherwise degrades into a silent GNU build that only surfaces much later
-      # as an unrecognized MSVC linker flag -- and could never have linked the
-      # MSVC-ABI libraries vcpkg installs for this triplet anyway.
-      - name: Build extension (Windows)
-        if: runner.os == 'Windows'
-        shell: cmd
         env:
           VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+        run: make release
+
+      # --- Portability gate -------------------------------------------------
+      # Mirrors release.yml. `make test` below cannot catch a dynamic-linkage
+      # mistake, because it loads the extension on the machine that built it,
+      # where the apt/brew libraries are present. Reading the binary's own
+      # dependency table is the only check that fails here rather than on a
+      # user's machine. Runs for cross builds too — inspecting a Mach-O needs no
+      # ability to execute it.
+      - name: Assert the extension is self-contained
+        shell: bash
         run: |
-          set "VSWHERE=C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-          if not exist "%VSWHERE%" ( echo ::error::vswhere.exe not found & exit /b 1 )
-          for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-          if not defined VSPATH ( echo ::error::No Visual Studio install with the C++ toolset & exit /b 1 )
-          echo Using Visual Studio at %VSPATH%
-          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          where cl >nul 2>&1 || ( echo ::error::cl.exe missing from PATH after vcvars64 & exit /b 1 )
-          REM Git ships a link.exe that otherwise shadows MSVC's linker on PATH.
-          if exist "C:\Program Files\Git\usr\bin\link.exe" move "C:\Program Files\Git\usr\bin\link.exe" "C:\Program Files\Git\usr\bin\link-git.exe"
-          make release
+          ext=$(find build/release -name 'mcap.duckdb_extension' | head -1)
+          if [ -z "$ext" ]; then echo "::error::mcap.duckdb_extension not found"; exit 1; fi
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            bad=$(otool -L "$ext" | tail -n +2 | awk '{print $1}' \
+                  | grep -vE '^(/usr/lib/|/System/Library/|@rpath/mcap\.duckdb_extension)' || true)
+          else
+            bad=$(readelf -d "$ext" | grep NEEDED | sed -E 's/.*\[(.*)\]/\1/' \
+                  | grep -vE '^(libc\.so|libm\.so|libdl\.so|librt\.so|libpthread\.so|libstdc\+\+\.so|libgcc_s\.so|ld-linux)' || true)
+          fi
+
+          if [ -n "$bad" ]; then
+            echo "::error::${{ matrix.platform }} extension is NOT self-contained; it would fail to load on any machine without these:"
+            echo "$bad"
+            echo
+            echo "Cause: this matrix entry built without the vcpkg toolchain, so lz4/zstd/protobuf"
+            echo "linked dynamically against the runner's own libraries. Give the entry a"
+            echo "vcpkg_target_triplet (the *-release triplets link statically)."
+            exit 1
+          fi
+          echo "OK: ${{ matrix.platform }} has no non-system dynamic dependencies."
 
       # Skipped for osx_amd64: an x86_64 unittest binary cannot run on the
       # arm64 runner that produced it. Mirrors upstream's own matrix.
@@ -182,8 +163,6 @@ jobs:
         shell: bash
         run: make test
 
-      # run_cpp_tests.sh drives a Unix toolchain directly (c++, -Wl,-rpath,
-      # lib*.dylib/.so), so it does not apply to the MSVC build.
       - name: Run C++ unit tests
-        if: ${{ !matrix.cross && runner.os != 'Windows' }}
+        if: ${{ !matrix.cross }}
         run: ./run_cpp_tests.sh
